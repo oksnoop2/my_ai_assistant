@@ -1,0 +1,17 @@
+# Ignore all data, cache, and OS-specific files
+
+# The main directory for all persistent data
+volumes/
+
+# Any Python virtual environments
+venv/
+*.venv
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE and OS files
+.vscode/
+.idea/
+*.DS_Store
