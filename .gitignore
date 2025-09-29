@@ -1,17 +1,17 @@
-# Ignore all data, cache, and OS-specific files
-
-# The main directory for all persistent data
-volumes/
-
-# Any Python virtual environments
-venv/
-*.venv
-
-# Python cache files
+# Python dependencies and artifacts
 __pycache__/
 *.pyc
+*.whl
 
-# IDE and OS files
+# AI Models and Data
+*.gguf
+*.wav
+volumes/
+
+# Local analysis files
+dump.txt
+
+# OS and IDE files
+.DS_Store
 .vscode/
 .idea/
-*.DS_Store

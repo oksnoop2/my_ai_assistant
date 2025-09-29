@@ -1,5 +1,4 @@
-# my_ai_assistant/orchestrator/orchestrator.py (CORRECT AND FINAL VERSION)
-
+# orchestrator-service/service.py
 import os
 import io
 import sys
@@ -7,18 +6,24 @@ import time
 import tempfile
 import subprocess
 from typing import Optional
-
 import requests
 import numpy as np
 import sounddevice as sd
 from scipy.io.wavfile import write, read
 from scipy.signal import resample
 
-# ---- Service base URLs and Configuration ----
-ASR_URL = "http://asr:9000"
-TTS_URL = "http://tts:8000"
-LLM_URL = "http://llm:8080"
-
+# ---- Service URLs and Configuration ----
+try:
+    # These now correctly point to the internal container names and ports
+    RESOURCE_MANAGER_URL = os.environ["RESOURCE_MANAGER_URL"]
+    ASR_SERVICE_URL = os.environ["ASR_SERVICE_URL"]
+    TTS_SERVICE_URL = os.environ["TTS_SERVICE_URL"]
+    RAG_SERVICE_URL = os.environ["RAG_SERVICE_URL"]
+    LLM_SERVICE_URL = os.environ["LLM_SERVICE_URL"] 
+    
+except KeyError as e:
+    print(f"🔥 Critical environment variable missing: {e}", file=sys.stderr)
+    sys.exit(1)
 RECORD_SECONDS = 5
 WHISPER_SAMPLE_RATE = 16000
 PLAYBACK_SAMPLE_RATE = 48000
@@ -26,31 +31,31 @@ SLEEP_SEC = 2.0
 
 # ---- Core Functions ----
 
+    
 def record_audio() -> Optional[io.BytesIO]:
-    """Records audio from the specified ALSA device and returns it as an in-memory WAV object."""
-    card, dev = 1, 7
-    tmp_name = tempfile.mktemp(suffix=".wav")
-    hw_str = f"hw:{card},{dev}"
-    cmd = [
-        "arecord", "-D", hw_str, "-f", "S16_LE", "-c", "2",
-        "-r", str(WHISPER_SAMPLE_RATE), "-d", str(RECORD_SECONDS), tmp_name
-    ]
-    print(f"⏺ Recording via arecord (device {hw_str}) -> {tmp_name}")
+    """Records audio using sounddevice and returns it as an in-memory WAV object."""
+    print(f"⏺ Recording for {RECORD_SECONDS} seconds at {WHISPER_SAMPLE_RATE}Hz...")
     try:
-        subprocess.run(cmd, check=True, timeout=RECORD_SECONDS + 10, capture_output=True)
-        sr, data = read(tmp_name)
-        data_mono = data.mean(axis=1).astype(np.int16)
-        buf = io.BytesIO()
-        write(buf, sr, data_mono)
-        buf.seek(0)
-        return buf
-    except subprocess.CalledProcessError as e:
-        print(f"⚠ arecord failed:\n{e.stderr.decode()}", file=sys.stderr)
-        return None
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+        # Record audio using sounddevice
+        recording = sd.rec(
+            int(RECORD_SECONDS * WHISPER_SAMPLE_RATE),
+            samplerate=WHISPER_SAMPLE_RATE,
+            channels=1,
+            dtype='int16'  # This corresponds to 'S16_LE'
+        )
+        sd.wait()  # Wait until the recording is finished
 
+        # Convert the NumPy array to an in-memory WAV file
+        buf = io.BytesIO()
+        write(buf, WHISPER_SAMPLE_RATE, recording)
+        buf.seek(0)
+        print("✅ Recording complete.")
+        return buf
+    except Exception as e:
+        print(f"⚠ Audio recording failed: {e}", file=sys.stderr)
+        return None
+
+  
 def tts_play_wav_bytes(wav_bytes: bytes):
     """Resamples and plays WAV audio bytes using sounddevice."""
     try:
@@ -91,7 +96,7 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
     try:
         wav_obj.seek(0)
         files = {'audio_file': ('rec.wav', wav_obj.read(), 'audio/wav')}
-        r = requests.post(f"{ASR_URL}/asr", params={'task': 'transcribe'}, files=files, timeout=30)
+        r = requests.post(f"{ASR_SERVICE_URL}/asr", params={'task': 'transcribe'}, files=files, timeout=30)
         r.raise_for_status()
         text = r.json().get("text", "").strip()
         print(f"🗣 ASR → '{text}'")
@@ -100,63 +105,54 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
         print(f"❌ ASR request failed: {e}", file=sys.stderr)
         return None
 
-def query_llm(prompt_text: str):
-    """Manages the LLM model lifecycle (load, query, unload) to conserve VRAM."""
+def query_rag_system(prompt_text: str):
+    """
+    Sends the user's question to the RAG Service and gets the final answer.
+    """
     if not prompt_text:
         return None
-    response_content = None
+    
+    print("ORCHESTRATOR: Sending question to RAG Service...")
     try:
-        print("🚀 Requesting LLM model load...")
-        requests.post(f"{LLM_URL}/load", timeout=90).raise_for_status()
-        
-        print("🤖 Querying LLM...")
-        payload = {"prompt": f"User: {prompt_text}\nAssistant:"}
-        r = requests.post(f"{LLM_URL}/completion", json=payload, timeout=60)
-        r.raise_for_status()
-        response_content = r.json().get("content", "").strip()
+        response = requests.post(f"{RAG_SERVICE_URL}/query", json={"question": prompt_text}, timeout=300) # Long timeout
+        response.raise_for_status()
+        return response.json().get("response")
     except Exception as e:
-        print(f"❌ LLM workflow failed: {e}", file=sys.stderr)
-    finally:
-        # Crucially, always attempt to unload the model to free VRAM
-        print("🛑 Requesting LLM model unload...")
-        try:
-            requests.post(f"{LLM_URL}/unload", timeout=60)
-        except Exception as unload_e:
-            print(f"⚠️ Failed to unload LLM model: {unload_e}", file=sys.stderr)
-    return response_content
+        print(f"❌ RAG system request failed: {e}", file=sys.stderr)
+        return "Sorry, I had a problem processing that request."
 
 def speak_text(text: str, voice_path="/voices/my_voice.wav"):
-    """Manages the TTS model lifecycle (load, synthesize, unload) to conserve VRAM."""
+    """
+    Ensures the TTS model is loaded via the Resource Manager, then synthesizes speech.
+    """
     if not text:
         return
     try:
-        print("🚀 Requesting TTS model load...")
-        requests.post(f"{TTS_URL}/load", timeout=120).raise_for_status()
+        print("🗣️  Requesting TTS model from Resource Manager...")
+        requests.post(f"{RESOURCE_MANAGER_URL}/request_model", json={"model_name": "tts"}, timeout=180).raise_for_status()
+        print("✅ TTS model is ready in RAM.")
         
-        print(f"🔊 Requesting TTS for: '{text}'")
-        r = requests.post(f"{TTS_URL}/api/tts", json={"text": text, "speaker_wav": voice_path}, timeout=120)
+        print(f"🔊 Synthesizing: '{text}'")
+        r = requests.post(f"{TTS_SERVICE_URL}/api/tts", json={"text": text, "speaker_wav": voice_path}, timeout=120)
         r.raise_for_status()
         tts_play_wav_bytes(r.content)
-    except Exception as e:
+    except requests.RequestException as e:
         print(f"❌ TTS workflow failed: {e}", file=sys.stderr)
-    finally:
-        # Crucially, always attempt to unload the model to free VRAM
-        print("🛑 Requesting TTS model unload...")
-        try:
-            requests.post(f"{TTS_URL}/unload", timeout=60)
-        except Exception as unload_e:
-            print(f"⚠️ Failed to unload TTS model: {unload_e}", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ An unexpected error occurred during TTS: {e}", file=sys.stderr)
 
 def main():
     """Main application loop."""
     print("🚀 Orchestrator starting.")
-    # Wait for all services to be responsive before starting the main loop
+    # Add the resource manager to the health checks
     if not all([
-        wait_for_health("ASR", ASR_URL),
-        wait_for_health("LLM", LLM_URL),
-        wait_for_health("TTS", TTS_URL)
+        wait_for_health("Resource Manager", RESOURCE_MANAGER_URL),
+        wait_for_health("ASR Service", ASR_SERVICE_URL),
+        wait_for_health("TTS Service", TTS_SERVICE_URL),
+        wait_for_health("RAG Service", RAG_SERVICE_URL),
+        wait_for_health("LLM Service", LLM_SERVICE_URL)
     ]):
-        print("🔥 One or more services are not healthy. Exiting.", file=sys.stderr)
+        print("🔥 One or more critical services are not healthy. Exiting.", file=sys.stderr)
         sys.exit(1)
         
     print("✅ All services are responsive. Ready.")
@@ -171,7 +167,7 @@ def main():
                 print("…no input, try again.")
                 continue
                 
-            reply = query_llm(user_text)
+            reply = query_rag_system(user_text)
             print(f"🤖 LLM → '{reply}'")
             speak_text(reply)
             
