@@ -46,11 +46,11 @@ def load_model():
 @app.post("/completion")
 def completion(payload: CompletionRequest):
     if llm is None:
-        # This error is now the definitive sign that /load wasn't called or failed.
         raise HTTPException(status_code=503, detail="Model is not loaded. Call /load first.")
     
     try:
-        output = llm(payload.prompt, max_tokens=256, stop=["User:", "\n"], echo=False)
+        # FIX: Removed "\n" from the stop tokens to allow multi-line commit messages.
+        output = llm(payload.prompt, max_tokens=256, stop=["User:"], echo=False)
         content = output["choices"][0]["text"].strip()
         return {"content": content}
     except Exception as e:
