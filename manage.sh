@@ -41,7 +41,6 @@ MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[0;37m'; ORANGE='\033[0;93m'
 # CORE FUNCTIONS
 # ==============================================================================
 
-# --- FIX: Added the missing usage() function ---
 usage() {
     echo "USAGE:"
     echo "  $0 run      - Builds and runs the main application stack."
@@ -106,12 +105,10 @@ tail_logs() {
 }
 
 start_commit_llm() {
-    # Check if the image needs to be rebuilt because its source files are newer.
     local build_image=false
     if ! podman image exists "$COMMIT_LLM_IMAGE"; then
         build_image=true
     else
-        # FIX: Format the timestamp from Podman into a format that `find` can reliably parse.
         local image_created_time
         image_created_time=$(podman inspect -f '{{.Created.Format "2006-01-02 15:04:05"}}' "$COMMIT_LLM_IMAGE")
         
@@ -140,7 +137,6 @@ start_commit_llm() {
         echo "✅ LLM Server is running."
 
         echo "⏳ Triggering model load in helper LLM..."
-        # Give the server a moment to be fully ready before hitting the load endpoint.
         sleep 1 
         curl -s --max-time 180 -X POST "http://localhost:$COMMIT_LLM_PORT/load" > /dev/null
 
@@ -156,7 +152,6 @@ start_commit_llm() {
 }
 
 auto_commit() {
-    # This trap ensures the helper container is stopped when the function exits for any reason.
     trap 'echo -e "\n${ORANGE}### Stopping commit helper service... ###${NC}"; podman stop "$COMMIT_LLM_NAME" &>/dev/null' RETURN
 
     echo -e "${GREEN}### CHECKING FOR CHANGES ###${NC}"
@@ -230,7 +225,6 @@ EOM
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" | jq -r '.content')
         
-    # FIX: Replace fragile `xargs` with robust Bash parameter expansion for trimming whitespace.
     COMMIT_MSG="${COMMIT_MSG#"${COMMIT_MSG%%[![:space:]]*}"}"
     COMMIT_MSG="${COMMIT_MSG%"${COMMIT_MSG##*[![:space:]]}"}"
         
@@ -243,11 +237,8 @@ EOM
     
     git commit -m "$COMMIT_MSG"
     
-    read -p "Push to origin? (y/N) " -r choice
-    echo ""
-    if [[ "$push_choice" =~ ^[Yy]$ ]]; then
-        git push --set-upstream origin main
-    fi
+    # --- PUSH LOGIC REMOVED ---
+    echo -e "\n${GREEN}✅ Commit created locally. Push to remote using your Git client.${NC}"
 }
 
 run_services() {
