@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Unified Management Script for the AI Assistant Project
+# Unified Management Script for the AI Assistant Project ~
 #
 # USAGE:
 #   ./manage.sh run      - Builds and runs the main application stack.
