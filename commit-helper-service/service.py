@@ -2,10 +2,15 @@
 # A simplified, standalone LLM service for internal tooling.
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel  # Import BaseModel from pydantic
 from llama_cpp import Llama
 import os
 
 app = FastAPI()
+
+# --- Define a Pydantic model for the request body ---
+class CompletionRequest(BaseModel):
+    prompt: str
 
 # --- Globals ---
 llm = None
@@ -37,14 +42,14 @@ def health():
     return {"status": "ok", "model_status": "loaded"}
 
 @app.post("/completion")
-def completion(request: dict):
+def completion(payload: CompletionRequest): # Use the Pydantic model for validation
     """Performs inference directly without any external dependencies."""
     if llm is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
     
-    prompt = request.get("prompt")
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt not provided.")
+    # Access the prompt directly from the validated payload object
+    prompt = payload.prompt
+    # The 'if not prompt:' check is no longer needed as Pydantic handles it
 
     try:
         output = llm(prompt, max_tokens=256, stop=["User:", "\n"], echo=False)
