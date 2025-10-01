@@ -173,30 +173,30 @@ auto_commit() {
         return
     fi
     
-    # Start the helper service
     start_commit_llm
-    
-    # Stage all changes before diffing
     git add .
     
+    # FINAL FIX: Keep both added (+) and removed (-) lines for full context,
+    # while still removing the diff headers.
     local DIFF_CONTENT
-    DIFF_CONTENT=$(git diff --staged)
+    DIFF_CONTENT=$(git diff --staged | grep -E '^\+|-|^\@\@' | grep -v -E '^\+\+\+|^\-\-\-')
     
     if [[ -z "$DIFF_CONTENT" ]]; then
-        echo "No staged changes to commit after 'git add'."
+        # This can now correctly happen if changes are only whitespace, etc.
+        echo "No meaningful code changes detected to commit."
         return
     fi
 
     local PROMPT
     read -r -d '' PROMPT << EOM
-You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. The message must follow the conventional commit format. The body should explain the 'what' and 'why' of the changes.
+You are an expert programmer writing a conventional commit message.
+Your task is to summarize the semantic meaning of the code changes provided below.
+The message must follow the conventional commit format. The body should explain the 'what' and 'why'. Do not mention filenames.
 
 --- EXAMPLE ---
 
-Diff:
+Code Changes:
 ---
--    echo "Starting server on port 8080..."
--    uvicorn main:app --host 0.0.0.0 --port 8080
 +    APP_PORT=8080
 +    echo "Starting server on port \$APP_PORT..."
 +    uvicorn main:app --host 0.0.0.0 --port \$APP_PORT
@@ -209,7 +209,7 @@ The server port was previously hardcoded. This change introduces an APP_PORT env
 
 --- ACTUAL TASK ---
 
-Diff:
+Code Changes:
 ---
 $DIFF_CONTENT
 
@@ -240,7 +240,6 @@ EOM
     read -p "Push to origin? (y/N) " -r push_choice
     echo ""
     if [[ "$push_choice" =~ ^[Yy]$ ]]; then
-        # FIX: Use --set-upstream to handle the first push and all subsequent pushes.
         git push --set-upstream origin main
     fi
 }
