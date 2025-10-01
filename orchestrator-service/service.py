@@ -99,11 +99,24 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
     """Sends audio data to the ASR service and returns the transcribed text."""
     if not wav_obj:
         return None
+        
+    # --- START DEBUGGING CHANGE ---
+    # Save the recorded audio to a file we can inspect.
+    # We'll save it in the tts voices directory as it's an easy volume to access.
+    try:
+        with open("/voices/last_recording.wav", "wb") as f:
+            wav_obj.seek(0)
+            f.write(wav_obj.read())
+        print("🎤 Saved recording to /voices/last_recording.wav for inspection.")
+    except Exception as e:
+        print(f"🔥 Failed to save debug audio file: {e}", file=sys.stderr)
+    # --- END DEBUGGING CHANGE ---
+    
     print("📝 Transcribing audio via ASR...")
     try:
         wav_obj.seek(0)
         files = {'audio_file': ('rec.wav', wav_obj.read(), 'audio/wav')}
-        r = requests.post(f"{ASR_SERVICE_URL}/asr", params={'task': 'transcribe'}, files=files, timeout=30)
+        r = requests.post(f"{ASR_SERVICE_URL}/asr", files=files, timeout=30)
         r.raise_for_status()
         text = r.json().get("text", "").strip()
         print(f"🗣 ASR → '{text}'")
