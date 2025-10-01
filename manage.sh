@@ -184,7 +184,6 @@ auto_commit() {
         return
     fi
 
-    # FINAL FIX: Remove quotes from EOM and escape the special characters in the prompt.
     local PROMPT
     read -r -d '' PROMPT << EOM
 You are an expert programmer writing a Conventional Commit message. Your task is to summarize the code changes below.
@@ -231,7 +230,9 @@ EOM
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" | jq -r '.content')
         
-    COMMIT_MSG=$(echo "$COMMIT_MSG" | xargs)
+    # FIX: Replace fragile `xargs` with robust Bash parameter expansion for trimming whitespace.
+    COMMIT_MSG="${COMMIT_MSG#"${COMMIT_MSG%%[![:space:]]*}"}"
+    COMMIT_MSG="${COMMIT_MSG%"${COMMIT_MSG##*[![:space:]]}"}"
         
     if [[ -z "$COMMIT_MSG" ]]; then
         echo -e "${RED}🔥 Failed to generate commit message. Using a default message.${NC}"
