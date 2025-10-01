@@ -106,24 +106,54 @@ tail_logs() {
 }
 
 start_commit_llm() {
+    # Check if the image needs to be rebuilt because its source files are newer.
+    local build_image=false
     if ! podman image exists "$COMMIT_LLM_IMAGE"; then
+        build_image=true
+    else
+        # FIX: Format the timestamp from Podman into a format that `find` can reliably parse.
+        local image_created_time
+        image_created_time=$(podman inspect -f '{{.Created.Format "2006-01-02 15:04:05"}}' "$COMMIT_LLM_IMAGE")
+        
+        if [ "$(find "./$COMMIT_HELPER_NAME" -type f -newermt "$image_created_time" | wc -l)" -gt 0 ]; then
+            echo -e "${YELLOW}### Source files have changed. Rebuilding commit helper image... ###${NC}"
+            build_image=true
+        fi
+    fi
+
+    if [ "$build_image" = true ]; then
         echo -e "${CYAN}### Building dedicated commit helper image... ###${NC}"
         podman build -t "$COMMIT_LLM_IMAGE" "./$COMMIT_HELPER_NAME"
     fi
+
     if ! podman container exists "$COMMIT_LLM_NAME" || [ "$(podman inspect -f '{{.State.Status}}' "$COMMIT_LLM_NAME")" != "running" ]; then
         echo -e "${CYAN}### Starting dedicated commit helper LLM... ###${NC}"
         podman run --replace -d --name "$COMMIT_LLM_NAME" --network "$NETWORK_NAME" --gpus all \
           -p "$COMMIT_LLM_PORT:$COMMIT_LLM_INTERNAL_PORT" \
           -v "./volumes/llm/gguf-models:/models:z" \
           "$COMMIT_LLM_IMAGE"
-        echo "Waiting for helper LLM..."
-        until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$COMMIT_LLM_PORT/health")" = "200" ]; do sleep 1; done
-        echo "✅ Commit helper is ready."
+        
+        echo "Waiting for helper LLM server..."
+        until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$COMMIT_LLM_PORT/health")" = "200" ]; do 
+            sleep 1; 
+        done
+        echo "✅ LLM Server is running."
+
+        echo "⏳ Triggering model load in helper LLM..."
+        # Give the server a moment to be fully ready before hitting the load endpoint.
+        sleep 1 
+        curl -s --max-time 180 -X POST "http://localhost:$COMMIT_LLM_PORT/load" > /dev/null
+
+        echo "Waiting for model to load..."
+        until curl -s "http://localhost:$COMMIT_LLM_PORT/health" | jq -e '.model_loaded == true' > /dev/null; do
+            printf "."
+            sleep 1;
+        done
+        echo -e "\n✅ Commit helper model is loaded and ready."
     else
         echo "✅ Commit helper is already running."
     fi
 }
-
 # --- FIX: Overhauled the auto_commit function for robustness ---
 auto_commit() {
     # This trap ensures the helper container is stopped when the function exits for any reason.
