@@ -184,13 +184,13 @@ auto_commit() {
         return
     fi
 
-    # FINAL FIX: Quote the 'EOM' to prevent shell expansion inside the here-document.
+    # FINAL FIX: Remove quotes from EOM and escape the special characters in the prompt.
     local PROMPT
-    read -r -d '' PROMPT << 'EOM'
+    read -r -d '' PROMPT << EOM
 You are an expert programmer writing a Conventional Commit message. Your task is to summarize the code changes below.
 
 Follow these rules:
-1.  The message MUST follow the conventional commit format: `<type>(<scope>): <subject>`.
+1.  The message MUST follow the conventional commit format: \`<type\>(\<scope\>): \<subject\>\`.
 2.  Use the function name from the diff hunk (the text after '@@ ... @@') as the <scope>. If multiple functions are changed, use the most significant one.
 3.  The <subject> should be a concise, imperative summary of the change.
 4.  The body should explain the 'what' and 'why' of the changes. Do not mention filenames.
@@ -242,7 +242,7 @@ EOM
     
     git commit -m "$COMMIT_MSG"
     
-    read -p "Push to origin? (y/N) " -r push_choice
+    read -p "Push to origin? (y/N) " -r choice
     echo ""
     if [[ "$push_choice" =~ ^[Yy]$ ]]; then
         git push --set-upstream origin main
