@@ -1,11 +1,9 @@
-# my_ai_assistant/llm/Dockerfile (Corrected and Final Version)
+# commit-helper-service/Dockerfile
 
 FROM docker.io/nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
-# Set DEBIAN_FRONTEND to noninteractive to avoid prompts during apt-get install
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime AND build-time dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
@@ -18,7 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
-# Install Python libraries for the service, specifically targeting CUDA 12.4
 RUN pip3 install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
