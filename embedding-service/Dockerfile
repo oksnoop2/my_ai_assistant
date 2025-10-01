@@ -14,10 +14,11 @@ RUN pip3 install --no-cache-dir --upgrade pip
 WORKDIR /app
 COPY . .
 
-RUN pip3 install --no-cache-dir \
+RUN pip3 install --cache-dir /cache \
     fastapi \
     uvicorn \
     torch torchaudio --extra-index-url https://download.pytorch.org/whl/cu124 \
+    einops \
     sentence-transformers
 
 EXPOSE 8000

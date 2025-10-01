@@ -10,7 +10,7 @@ import requests
 import numpy as np
 import sounddevice as sd
 from scipy.io.wavfile import write, read
-from scipy.signal import resample
+from scipy.signal import resample as resample_audio
 
 # ---- Service URLs and Configuration ----
 try:
@@ -25,6 +25,7 @@ except KeyError as e:
     print(f"🔥 Critical environment variable missing: {e}", file=sys.stderr)
     sys.exit(1)
 RECORD_SECONDS = 5
+RECORD_SAMPLE_RATE = 48000
 WHISPER_SAMPLE_RATE = 16000
 PLAYBACK_SAMPLE_RATE = 48000
 SLEEP_SEC = 2.0
@@ -33,23 +34,29 @@ SLEEP_SEC = 2.0
 
     
 def record_audio() -> Optional[io.BytesIO]:
-    """Records audio using sounddevice and returns it as an in-memory WAV object."""
-    print(f"⏺ Recording for {RECORD_SECONDS} seconds at {WHISPER_SAMPLE_RATE}Hz...")
+    """Records at a high sample rate and resamples down for Whisper."""
+    print(f"⏺ Recording for {RECORD_SECONDS} seconds at {RECORD_SAMPLE_RATE}Hz...")
     try:
-        # Record audio using sounddevice
+        # Record at the hardware-friendly sample rate
         recording = sd.rec(
-            int(RECORD_SECONDS * WHISPER_SAMPLE_RATE),
-            samplerate=WHISPER_SAMPLE_RATE,
+            int(RECORD_SECONDS * RECORD_SAMPLE_RATE),
+            samplerate=RECORD_SAMPLE_RATE,
             channels=1,
-            dtype='int16'  # This corresponds to 'S16_LE'
+            dtype='int16'
         )
-        sd.wait()  # Wait until the recording is finished
+        sd.wait()
 
-        # Convert the NumPy array to an in-memory WAV file
+        print("🎤 Resampling audio to 16000Hz for ASR...")
+        # Calculate the number of samples in the new audio
+        num_samples = int(len(recording) * WHISPER_SAMPLE_RATE / RECORD_SAMPLE_RATE)
+        # Resample the audio
+        resampled_recording = resample_audio(recording, num_samples).astype(np.int16)
+
+        # Convert the RESAMPLED NumPy array to an in-memory WAV file
         buf = io.BytesIO()
-        write(buf, WHISPER_SAMPLE_RATE, recording)
+        write(buf, WHISPER_SAMPLE_RATE, resampled_recording) # Save with the correct Whisper sample rate
         buf.seek(0)
-        print("✅ Recording complete.")
+        print("✅ Recording complete and resampled.")
         return buf
     except Exception as e:
         print(f"⚠ Audio recording failed: {e}", file=sys.stderr)
@@ -107,14 +114,14 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
 
 def query_rag_system(prompt_text: str):
     """
-    Sends the user's question to the RAG Service and gets the final answer.
+    Sends the user's input to the RAG Service and gets a synthesized answer.
     """
     if not prompt_text:
         return None
     
     print("ORCHESTRATOR: Sending question to RAG Service...")
     try:
-        response = requests.post(f"{RAG_SERVICE_URL}/query", json={"question": prompt_text}, timeout=300) # Long timeout
+        response = requests.post(f"{RAG_SERVICE_URL}/query", json={"input_text": prompt_text}, timeout=300) # Long timeout
         response.raise_for_status()
         return response.json().get("response")
     except Exception as e:

@@ -27,6 +27,7 @@ RUN python3 -m pip install --no-cache-dir \
     llama-index-llms-llama-cpp \
     llama-index-embeddings-huggingface \
     llama-index-graph-stores-neo4j \
+    llama-index-readers-file \
     einops \
     torch --extra-index-url https://download.pytorch.org/whl/cu124
 
