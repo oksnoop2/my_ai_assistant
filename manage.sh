@@ -154,6 +154,7 @@ start_commit_llm() {
         echo "✅ Commit helper is already running."
     fi
 }
+
 auto_commit() {
     # This trap ensures the helper container is stopped when the function exits for any reason.
     trap 'echo -e "\n${ORANGE}### Stopping commit helper service... ###${NC}"; podman stop "$COMMIT_LLM_NAME" &>/dev/null' RETURN
@@ -186,8 +187,6 @@ auto_commit() {
         return
     fi
 
-    # FIX: Construct a more detailed few-shot prompt for the LLM.
-    # This provides a clear example for the model to follow.
     local PROMPT
     read -r -d '' PROMPT << EOM
 You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. The message must follow the conventional commit format. The body should explain the 'what' and 'why' of the changes.
@@ -218,7 +217,6 @@ Commit Message:
 ---
 EOM
 
-    # Use jq to safely create the JSON payload
     local JSON_PAYLOAD
     JSON_PAYLOAD=$(jq -n --arg prompt_text "$PROMPT" '{prompt: $prompt_text}')
     
@@ -228,7 +226,6 @@ EOM
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" | jq -r '.content')
         
-    # Trim leading/trailing whitespace from the response
     COMMIT_MSG=$(echo "$COMMIT_MSG" | xargs)
         
     if [[ -z "$COMMIT_MSG" ]]; then
@@ -238,13 +235,13 @@ EOM
     
     echo -e "${GREEN}Generated Commit Message:${NC}\n${WHITE}$COMMIT_MSG${NC}\n"
     
-    # Commit using the generated message
     git commit -m "$COMMIT_MSG"
     
     read -p "Push to origin? (y/N) " -r push_choice
     echo ""
     if [[ "$push_choice" =~ ^[Yy]$ ]]; then
-        git push
+        # FIX: Use --set-upstream to handle the first push and all subsequent pushes.
+        git push --set-upstream origin main
     fi
 }
 
