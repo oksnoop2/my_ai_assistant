@@ -176,36 +176,41 @@ auto_commit() {
     start_commit_llm
     git add .
     
-    # FINAL FIX: Keep both added (+) and removed (-) lines for full context,
-    # while still removing the diff headers.
     local DIFF_CONTENT
     DIFF_CONTENT=$(git diff --staged | grep -E '^\+|-|^\@\@' | grep -v -E '^\+\+\+|^\-\-\-')
     
     if [[ -z "$DIFF_CONTENT" ]]; then
-        # This can now correctly happen if changes are only whitespace, etc.
         echo "No meaningful code changes detected to commit."
         return
     fi
 
+    # FINAL FIX: Quote the 'EOM' to prevent shell expansion inside the here-document.
     local PROMPT
-    read -r -d '' PROMPT << EOM
-You are an expert programmer writing a conventional commit message.
-Your task is to summarize the semantic meaning of the code changes provided below.
-The message must follow the conventional commit format. The body should explain the 'what' and 'why'. Do not mention filenames.
+    read -r -d '' PROMPT << 'EOM'
+You are an expert programmer writing a Conventional Commit message. Your task is to summarize the code changes below.
+
+Follow these rules:
+1.  The message MUST follow the conventional commit format: `<type>(<scope>): <subject>`.
+2.  Use the function name from the diff hunk (the text after '@@ ... @@') as the <scope>. If multiple functions are changed, use the most significant one.
+3.  The <subject> should be a concise, imperative summary of the change.
+4.  The body should explain the 'what' and 'why' of the changes. Do not mention filenames.
 
 --- EXAMPLE ---
 
 Code Changes:
 ---
-+    APP_PORT=8080
-+    echo "Starting server on port \$APP_PORT..."
-+    uvicorn main:app --host 0.0.0.0 --port \$APP_PORT
+@@ -42,7 +42,7 @@
+ # --- Helper Service for Git Commits ---
+ COMMIT_HELPER_NAME="commit-helper-service"
+ COMMIT_LLM_NAME="commit-helper-llm"
+-COMMIT_LLM_PORT="8081"
++COMMIT_LLM_PORT="8082"
 
 Commit Message:
 ---
-feat(server): add APP_PORT variable for configuration
+fix(config): correct commit helper port to 8082
 
-The server port was previously hardcoded. This change introduces an APP_PORT environment variable to make the port configurable, improving flexibility for deployment.
+The commit helper service was mapped to the wrong external port. This corrects the port mapping to align with the docker-compose configuration, fixing a connection issue.
 
 --- ACTUAL TASK ---
 
