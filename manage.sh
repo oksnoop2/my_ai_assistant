@@ -9,6 +9,7 @@
 #   ./manage.sh logs     - Tails the logs of all running services.
 #   ./manage.sh stop     - Stops and removes all project containers.
 #   ./manage.sh clean    - Stops containers and removes the network.
+#   ./manage.sh dump     - Dumps diagnostic information for debugging.
 #
 # ==============================================================================
 
@@ -27,6 +28,8 @@ ORCHESTRATOR_NAME="orchestrator-service"
 COMMIT_HELPER_NAME="commit-helper-service"
 COMMIT_LLM_NAME="commit-helper-llm"
 COMMIT_LLM_PORT="8081"
+# THIS IS THE PORT THE *HELPER* SERVICE USES INTERNALLY
+COMMIT_LLM_INTERNAL_PORT="8080"
 COMMIT_LLM_IMAGE="my-ai/commit-helper-service"
 ALL_CONTAINERS="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $ORCHESTRATOR_NAME $COMMIT_LLM_NAME"
 
@@ -37,6 +40,17 @@ MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[0;37m'; ORANGE='\033[0;93m'
 # ==============================================================================
 # CORE FUNCTIONS
 # ==============================================================================
+
+# --- FIX: Added the missing usage() function ---
+usage() {
+    echo "USAGE:"
+    echo "  $0 run      - Builds and runs the main application stack."
+    echo "  $0 commit   - Uses a dedicated, separate LLM to generate a commit message."
+    echo "  $0 logs     - Tails the logs of all running services."
+    echo "  $0 stop     - Stops and removes all project containers."
+    echo "  $0 clean    - Stops containers and removes the network."
+    echo "  $0 dump     - Dumps diagnostic information for debugging."
+}
 
 dump_diagnostics() {
     echo -e "${RED}🔴 A failure occurred or dump was requested. Collecting diagnostics...${NC}"
@@ -94,37 +108,83 @@ tail_logs() {
 start_commit_llm() {
     if ! podman image exists "$COMMIT_LLM_IMAGE"; then
         echo -e "${CYAN}### Building dedicated commit helper image... ###${NC}"
-        podman build -t $COMMIT_LLM_IMAGE ./$COMMIT_HELPER_NAME
+        podman build -t "$COMMIT_LLM_IMAGE" "./$COMMIT_HELPER_NAME"
     fi
-    if ! podman container exists "$COMMIT_LLM_NAME" || [ "$(podman inspect -f '{{.State.Status}}' $COMMIT_LLM_NAME)" != "running" ]; then
+    if ! podman container exists "$COMMIT_LLM_NAME" || [ "$(podman inspect -f '{{.State.Status}}' "$COMMIT_LLM_NAME")" != "running" ]; then
         echo -e "${CYAN}### Starting dedicated commit helper LLM... ###${NC}"
-        podman run --replace -d --name $COMMIT_LLM_NAME --network $NETWORK_NAME --gpus all -p $COMMIT_LLM_PORT:$LLM_INTERNAL_PORT \
-          -v ./volumes/llm/gguf-models:/models:z \
-          $COMMIT_LLM_IMAGE
+        podman run --replace -d --name "$COMMIT_LLM_NAME" --network "$NETWORK_NAME" --gpus all \
+          -p "$COMMIT_LLM_PORT:$COMMIT_LLM_INTERNAL_PORT" \
+          -v "./volumes/llm/gguf-models:/models:z" \
+          "$COMMIT_LLM_IMAGE"
         echo "Waiting for helper LLM..."
-        until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$COMMIT_LLM_PORT/health)" = "200" ]; do sleep 1; done
+        until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$COMMIT_LLM_PORT/health")" = "200" ]; do sleep 1; done
         echo "✅ Commit helper is ready."
     else
         echo "✅ Commit helper is already running."
     fi
 }
 
+# --- FIX: Overhauled the auto_commit function for robustness ---
 auto_commit() {
+    # This trap ensures the helper container is stopped when the function exits for any reason.
+    trap 'echo -e "\n${ORANGE}### Stopping commit helper service... ###${NC}"; podman stop "$COMMIT_LLM_NAME" &>/dev/null' RETURN
+
     echo -e "${GREEN}### CHECKING FOR CHANGES ###${NC}"
-    if git diff-index --quiet HEAD --; then echo "✅ No changes detected."; return; fi
-    git status -s; echo ""
-    read -p "Proceed with auto-commit? (y/N) " -n 1 -r; echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then echo "Commit aborted."; return; fi
+    if [[ -z $(git status --porcelain) ]]; then
+        echo "✅ No changes detected."
+        return
+    fi
+    git status -s
+    echo ""
+    
+    read -p "Proceed with auto-commit? (y/N) " -r choice
+    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+        echo "Commit aborted."
+        return
+    fi
+    
+    # Start the helper service
     start_commit_llm
+    
+    # Stage all changes before diffing
     git add .
+    
+    local DIFF_CONTENT
     DIFF_CONTENT=$(git diff --staged)
-    PROMPT="You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. Format: <type>: <subject>\n\n<body>\n\nDiff:\n---\n$DIFF_CONTENT\n---"
-    COMMIT_MSG=$(curl -s -X POST "http://localhost:$COMMIT_LLM_PORT/completion" -H 'Content-Type: application/json' -d "{ \"prompt\": \"$PROMPT\" }" | jq -r '.content')
-    if [ -z "$COMMIT_MSG" ]; then COMMIT_MSG="feat: Auto-commit on $(date)"; fi
+    
+    if [[ -z "$DIFF_CONTENT" ]]; then
+        echo "No staged changes to commit after 'git add'."
+        return
+    fi
+
+    # Construct a detailed prompt for the LLM
+    local PROMPT="You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. The message should follow the conventional commit format: '<type>(scope): <subject>'. The body is optional but should explain the 'what' and 'why' of the changes if necessary. Do not include the diff itself in the final message, only the summary.\n\nDiff:\n---\n$DIFF_CONTENT"
+    
+    # Use jq to safely create the JSON payload, preventing errors from special characters
+    local JSON_PAYLOAD
+    JSON_PAYLOAD=$(jq -n --arg prompt_text "$PROMPT" '{prompt: $prompt_text}')
+    
+    echo "### GENERATING COMMIT MESSAGE (this may take a moment)... ###"
+    local COMMIT_MSG
+    COMMIT_MSG=$(curl -s --max-time 120 -X POST "http://localhost:$COMMIT_LLM_PORT/completion" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" | jq -r '.content')
+        
+    if [[ -z "$COMMIT_MSG" ]]; then
+        echo -e "${RED}🔥 Failed to generate commit message. Using a default message.${NC}"
+        COMMIT_MSG="chore: automatic commit on $(date)"
+    fi
+    
     echo -e "${GREEN}Generated Commit Message:${NC}\n${WHITE}$COMMIT_MSG${NC}\n"
+    
+    # Commit using the generated message
     git commit -m "$COMMIT_MSG"
-    read -p "Push to origin? (y/N) " -n 1 -r; echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then git push; fi
+    
+    read -p "Push to origin? (y/N) " -r push_choice
+    echo ""
+    if [[ "$push_choice" =~ ^[Yy]$ ]]; then
+        git push
+    fi
 }
 
 run_services() {
@@ -178,11 +238,6 @@ run_services() {
 # ==============================================================================
 trap cleanup EXIT
 
-usage() {
-    echo -e "${GREEN}USAGE:${NC}"
-    grep -E "^#   \./manage.sh" "$0" | sed 's/^#   //'
-}
-
 case "$1" in
     run)
         run_services
@@ -190,8 +245,8 @@ case "$1" in
     commit)
         auto_commit
         ;;
-    setup-commit-helper)
-        setup_commit_helper
+    dump)
+        dump_diagnostics
         ;;
     logs)
         tail_logs
@@ -207,6 +262,7 @@ case "$1" in
         echo "✅ Network removed."
         ;;
     *)
+       
         usage
         exit 1
         ;;
