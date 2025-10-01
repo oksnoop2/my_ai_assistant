@@ -154,7 +154,6 @@ start_commit_llm() {
         echo "✅ Commit helper is already running."
     fi
 }
-# --- FIX: Overhauled the auto_commit function for robustness ---
 auto_commit() {
     # This trap ensures the helper container is stopped when the function exits for any reason.
     trap 'echo -e "\n${ORANGE}### Stopping commit helper service... ###${NC}"; podman stop "$COMMIT_LLM_NAME" &>/dev/null' RETURN
@@ -187,10 +186,39 @@ auto_commit() {
         return
     fi
 
-    # Construct a detailed prompt for the LLM
-    local PROMPT="You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. The message should follow the conventional commit format: '<type>(scope): <subject>'. The body is optional but should explain the 'what' and 'why' of the changes if necessary. Do not include the diff itself in the final message, only the summary.\n\nDiff:\n---\n$DIFF_CONTENT"
-    
-    # Use jq to safely create the JSON payload, preventing errors from special characters
+    # FIX: Construct a more detailed few-shot prompt for the LLM.
+    # This provides a clear example for the model to follow.
+    local PROMPT
+    read -r -d '' PROMPT << EOM
+You are an expert programmer writing conventional commit messages. Summarize the following git diff into a commit message. The message must follow the conventional commit format. The body should explain the 'what' and 'why' of the changes.
+
+--- EXAMPLE ---
+
+Diff:
+---
+-    echo "Starting server on port 8080..."
+-    uvicorn main:app --host 0.0.0.0 --port 8080
++    APP_PORT=8080
++    echo "Starting server on port \$APP_PORT..."
++    uvicorn main:app --host 0.0.0.0 --port \$APP_PORT
+
+Commit Message:
+---
+feat(server): add APP_PORT variable for configuration
+
+The server port was previously hardcoded. This change introduces an APP_PORT environment variable to make the port configurable, improving flexibility for deployment.
+
+--- ACTUAL TASK ---
+
+Diff:
+---
+$DIFF_CONTENT
+
+Commit Message:
+---
+EOM
+
+    # Use jq to safely create the JSON payload
     local JSON_PAYLOAD
     JSON_PAYLOAD=$(jq -n --arg prompt_text "$PROMPT" '{prompt: $prompt_text}')
     
@@ -199,6 +227,9 @@ auto_commit() {
     COMMIT_MSG=$(curl -s --max-time 120 -X POST "http://localhost:$COMMIT_LLM_PORT/completion" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" | jq -r '.content')
+        
+    # Trim leading/trailing whitespace from the response
+    COMMIT_MSG=$(echo "$COMMIT_MSG" | xargs)
         
     if [[ -z "$COMMIT_MSG" ]]; then
         echo -e "${RED}🔥 Failed to generate commit message. Using a default message.${NC}"
