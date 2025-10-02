@@ -28,7 +28,7 @@ from llama_index.core.llms import (
 )
 from llama_index.core.llms.callbacks import llm_completion_callback, llm_chat_callback
 
-# --- Logging and Configuration (remains the same) ---
+# --- Logging and Configuration ---
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 try:
@@ -43,29 +43,45 @@ except KeyError as e:
 INPUT_DATA_DIR = "./input_data"
 kg_index = None
 indexing_queue = Queue()
-# --- NEW: Threading event to signal indexing completion ---
 INDEXING_COMPLETE = threading.Event()
 
-# --- Custom Embedding and LLM Classes (remain the same) ---
+# --- Custom Embedding Class (MODIFIED FOR BATCHING) ---
 class RESTfulEmbedding(BaseEmbedding):
-    # ... (code is correct) ...
-    def _get_embedding(self, text: str) -> List[float]:
+    def _get_embedding_batch(self, texts: List[str]) -> List[List[float]]:
+        """Helper to call the new batch endpoint."""
         try:
+            # Request the embedding model from the resource manager
             requests.post(f"{RESOURCE_MANAGER_URL}/request_model", json={"model_name": "embedding"}, timeout=180).raise_for_status()
-            response = requests.post(f"{EMBEDDING_SERVICE_URL}/embed", json={"text": text}, timeout=60)
+            
+            # Send the batch of texts to the embedding service
+            response = requests.post(f"{EMBEDDING_SERVICE_URL}/embed-batch", json={"texts": texts}, timeout=180) # Increased timeout for larger batches
             response.raise_for_status()
-            return response.json()["embedding"]
+            
+            return response.json()["embeddings"]
         except Exception as e:
-            logging.error(f"❌ Failed to get embedding for text: '{text}'. Error: {e}")
-            return [0.0] * 768
-    def _get_query_embedding(self, query: str) -> List[float]: return self._get_embedding(query)
-    def _get_text_embedding(self, text: str) -> List[float]: return self._get_embedding(text)
-    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]: return [self._get_embedding(text) for text in texts]
-    async def _aget_query_embedding(self, query: str) -> List[float]: return self._get_query_embedding(query)
-    async def _aget_text_embedding(self, text: str) -> List[float]: return self._get_text_embedding(text)
+            logging.error(f"❌ Failed to get embedding for batch of size {len(texts)}. Error: {e}")
+            # Return a list of zero vectors with the correct dimensions
+            return [[0.0] * 768 for _ in texts]
 
+    # LlamaIndex will call this method automatically for batches
+    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        return self._get_embedding_batch(texts)
+
+    # Fallback methods for single texts (less efficient)
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return self._get_embedding_batch([query])[0]
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return self._get_embedding_batch([text])[0]
+        
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        return self._get_query_embedding(query)
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return self._get_text_embedding(text)
+
+# --- Custom LLM Class (remains the same) ---
 class RESTfulLLM(LLM):
-    # ... (code is correct) ...
     @property
     def metadata(self) -> LLMMetadata: return LLMMetadata(context_window=4096, num_output=256, model_name="local-llm-service")
     def _call_llm_service(self, prompt: str) -> str:
@@ -107,11 +123,14 @@ app = FastAPI(title="GraphRAG Service with LlamaIndex")
 
 @app.on_event("startup")
 def configure_llama_index():
-    # ... (Neo4j connection and LlamaIndex Settings remain the same) ...
     global kg_index
     logging.info("--- Initializing LlamaIndex Components ---")
+    
+    # --- FIX: Define batch size for embedding ---
+    Settings.embed_batch_size = 64
     Settings.llm = RESTfulLLM()
     Settings.embed_model = RESTfulEmbedding()
+
     max_retries=10; wait_seconds=5
     for i in range(max_retries):
         try:
@@ -123,28 +142,26 @@ def configure_llama_index():
             logging.warning(f"Neo4j not ready yet... Retrying in {wait_seconds} seconds...")
             if i == max_retries - 1: raise e
             time.sleep(wait_seconds)
+            
     storage_context = StorageContext.from_defaults(graph_store=graph_store)
     kg_index = KnowledgeGraphIndex.from_documents([], storage_context=storage_context, max_triplets_per_chunk=2, include_embeddings=True)
     logging.info("✅ LlamaIndex Components Initialized.")
 
-    # --- Start File Watcher and Background Indexer (this logic is now improved) ---
+    # --- Start File Watcher and Background Indexer ---
     os.makedirs(INPUT_DATA_DIR, exist_ok=True)
     
-    # Start the background thread
     indexer_thread = threading.Thread(target=background_indexer, daemon=True)
     indexer_thread.start()
     
-    # Schedule watching for *new* files
     observer = Observer()
     observer.schedule(DocumentHandler(), INPUT_DATA_DIR, recursive=True)
     observer.start()
     logging.info(f"👀 Now watching for new files in '{INPUT_DATA_DIR}'...")
     
-    # Queue up existing files for initial processing
     initial_files = [os.path.join(root, name) for root, _, files in os.walk(INPUT_DATA_DIR) for name in files if name.endswith(('.txt', '.md'))]
     if not initial_files:
         logging.info("No initial documents found. Indexing is complete.")
-        INDEXING_COMPLETE.set() # If no files, we're done
+        INDEXING_COMPLETE.set()
     else:
         for path in initial_files:
             logging.info(f"Found existing document on startup: {path}")
@@ -158,7 +175,6 @@ class DocumentHandler(FileSystemEventHandler):
             indexing_queue.put(event.src_path)
 
 def background_indexer():
-    # --- MODIFIED: The indexer now signals when it's done with the initial files ---
     while True:
         filepath = indexing_queue.get()
         try:
@@ -166,26 +182,26 @@ def background_indexer():
             reader = SimpleDirectoryReader(input_files=[filepath])
             documents = reader.load_data()
             for doc in documents:
+                # LlamaIndex will automatically use the batching we configured
+                # in the RESTfulEmbedding class and Settings.
                 kg_index.insert(doc)
             logging.info(f"✅ Finished indexing '{filepath}'.")
         except Exception as e:
             logging.error(f"❌ Indexing failed for '{filepath}': {e}")
         finally:
             indexing_queue.task_done()
-            # If the queue is empty after processing, the initial load is done.
             if indexing_queue.empty():
                 logging.info("✅ Initial document indexing complete.")
                 INDEXING_COMPLETE.set()
 
-# --- MODIFIED: Health Check ---
+# --- Health Check ---
 @app.get("/health")
 def health():
-    # The service is only "ok" if the index is built AND the initial indexing is done.
     if kg_index is not None and INDEXING_COMPLETE.is_set():
         return {"status": "ok", "index_ready": True}
     return {"status": "starting", "index_ready": False}
 
-# --- Query Endpoint (remains the same) ---
+# --- Query Endpoint (MODIFIED for better retrieval) ---
 @app.post("/query")
 def query_system(payload: dict):
     input_text = payload.get("input_text")
@@ -193,7 +209,13 @@ def query_system(payload: dict):
     if not INDEXING_COMPLETE.is_set(): raise HTTPException(status_code=503, detail="Index is not ready.")
     try:
         logging.info(f"Received input: '{input_text}'")
-        query_engine = kg_index.as_query_engine()
+        
+        # --- FIX: Use a hybrid retriever that leverages embeddings ---
+        query_engine = kg_index.as_query_engine(
+            retriever_mode="hybrid", 
+            similarity_top_k=5
+        )
+        
         response = query_engine.query(input_text)
         final_response = str(response)
         logging.info(f"⬅️  Received synthesized response: '{final_response}'")
