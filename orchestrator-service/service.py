@@ -95,6 +95,21 @@ def record_audio() -> Optional[io.BytesIO]:
         traceback.print_exc()
         return None
 
+def tts_play_wav_bytes(wav_bytes: bytes):
+    """Resamples and plays WAV audio bytes using sounddevice."""
+    try:
+        buf = io.BytesIO(wav_bytes)
+        original_sr, audio = read(buf)
+        
+        print(f"🔊 Resampling TTS audio from {original_sr}Hz to {PLAYBACK_SAMPLE_RATE}Hz...")
+        audio_float = audio.astype(np.float32) / 32768.0
+        num_samples = int(len(audio_float) * PLAYBACK_SAMPLE_RATE / original_sr)
+        audio_resampled = resample_audio(audio_float, num_samples)
+        
+        sd.play(audio_resampled, PLAYBACK_SAMPLE_RATE)
+        sd.wait()
+    except Exception as e:
+        print(f"⚠ TTS playback failed: {e}", file=sys.stderr)
 
 def transcribe_audio(wav_obj: Optional[io.BytesIO]):
     if not wav_obj:
