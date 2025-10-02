@@ -1,26 +1,31 @@
 # FILE: my_ai_assistant/asr/asr.py
+
 import os
 import whisper
 import torch
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 import tempfile
-import requests
-
-# --- Configuration ---
-# The model will now load to the CPU first to conserve GPU memory.
-CPU_DEVICE = "cpu"
-GPU_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_SIZE = "base"
-RESOURCE_MANAGER_URL = os.environ.get("RESOURCE_MANAGER_URL")
 
 # --- Model Loading ---
-print(f"🚀 ASR service starting...")
-print(f"📦 Loading Whisper model '{MODEL_SIZE}' into system RAM...")
-# Load to CPU initially
-model = whisper.load_model(MODEL_SIZE, device=CPU_DEVICE)
-print("✅ Whisper model loaded to RAM.")
+# Check for GPU and load the Whisper model.
+# "base" is a good starting point. You can use "small" or "medium" for more
+# accuracy if you have enough VRAM and memory.
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_size = "base"
+
+print(f"🚀 ASR service starting on device: {device}")
+print(f"📦 Loading Whisper model '{model_size}'... (This may take a moment on first run)")
+model = whisper.load_model(model_size, device=device)
+print("✅ Whisper model loaded.")
 
 app = FastAPI()
+
+@app.on_event("startup")
+def startup_log():
+    """Log essential info when the server starts."""
+    print("✅ ASR service initialized.")
+    print(f"💻 Device in use: {device}")
+    print(f"🧠 Model size: {model_size}")
 
 @app.get("/health")
 def health_check():
@@ -30,50 +35,30 @@ def health_check():
 @app.post("/asr")
 async def transcribe_audio(audio_file: UploadFile = File(...)):
     """
-    Accepts an audio file, acquires a GPU lock, moves the model to the GPU for transcription,
-    and then moves it back to the CPU.
+    Accepts an audio file upload and returns the transcribed text.
     """
     if not audio_file:
         raise HTTPException(status_code=400, detail="No audio file provided.")
 
-    if not RESOURCE_MANAGER_URL:
-        raise HTTPException(status_code=500, detail="RESOURCE_MANAGER_URL is not configured.")
-
     print(f"📝 Transcribing file: {audio_file.filename}")
+    # Whisper works best with file paths, so we save the upload to a temporary file
     try:
-        # Step 1: Acquire GPU lock
-        print("⏳ Requesting GPU lock from Resource Manager...")
-        requests.post(f"{RESOURCE_MANAGER_URL}/acquire_gpu", timeout=300).raise_for_status()
-        print("✅ GPU lock acquired by ASR Service.")
-
-        # Step 2: Move model to GPU
-        model.to(GPU_DEVICE)
-        print("➡️  Moved ASR model to GPU.")
-
-        # Step 3: Perform transcription
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            # Write the uploaded file content to the temporary file
             tmp.write(await audio_file.read())
             tmp_path = tmp.name
 
+        # Perform the transcription
         result = model.transcribe(tmp_path, fp16=torch.cuda.is_available())
         transcription = result.get("text", "").strip()
-        print(f"🗣️  Transcription result: '{transcription}'")
-        
-        # Clean up the temp file
-        os.unlink(tmp_path)
-        
+
+        print(f"🗣️ Transcription result: '{transcription}'")
         return {"text": transcription}
 
     except Exception as e:
         print(f"❌ Error during transcription: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Step 4: CRITICAL - Move model back to CPU and release the lock
-        model.to(CPU_DEVICE)
-        print("⬅️  Moved ASR model back to CPU.")
-        
-        requests.post(f"{RESOURCE_MANAGER_URL}/release_gpu", timeout=60)
-        print("✅ GPU lock released by ASR Service.")
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Ensure the temporary file is cleaned up
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)

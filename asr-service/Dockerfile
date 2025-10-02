@@ -3,6 +3,7 @@
 FROM docker.io/nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 
 # Install dependencies including ffmpeg and python3.11
 RUN apt-get update && apt-get install -y --no-install-recommends \

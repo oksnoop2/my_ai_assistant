@@ -14,95 +14,92 @@ from scipy.signal import resample as resample_audio
 
 # ---- Service URLs and Configuration ----
 try:
-    # These now correctly point to the internal container names and ports
     RESOURCE_MANAGER_URL = os.environ["RESOURCE_MANAGER_URL"]
     ASR_SERVICE_URL = os.environ["ASR_SERVICE_URL"]
     TTS_SERVICE_URL = os.environ["TTS_SERVICE_URL"]
     RAG_SERVICE_URL = os.environ["RAG_SERVICE_URL"]
     LLM_SERVICE_URL = os.environ["LLM_SERVICE_URL"] 
-    
 except KeyError as e:
     print(f"🔥 Critical environment variable missing: {e}", file=sys.stderr)
     sys.exit(1)
 RECORD_SECONDS = 5
-RECORD_SAMPLE_RATE = 48000
+RECORD_SAMPLE_RATE = 48000 # This will be ignored by arecord but kept for consistency
 WHISPER_SAMPLE_RATE = 16000
 PLAYBACK_SAMPLE_RATE = 48000
 SLEEP_SEC = 2.0
 
+def wait_for_health(service_name: str, service_url: str, timeout_sec: int = 180) -> bool:
+    """
+    Waits for a service to become healthy by polling its /health endpoint.
+
+    Args:
+        service_name: The human-readable name of the service.
+        service_url: The base URL of the service.
+        timeout_sec: The maximum time to wait in seconds.
+
+    Returns:
+        True if the service becomes healthy, False otherwise.
+    """
+    start_time = time.time()
+    health_url = f"{service_url}/health"
+    while time.time() - start_time < timeout_sec:
+        try:
+            response = requests.get(health_url, timeout=5)
+            if response.status_code == 200:
+                # Some services have a secondary check
+                if "index_ready" in response.json() and not response.json()["index_ready"]:
+                     print(f"⏳ Waiting for {service_name} index to be ready...")
+                else:
+                    print(f"✅ {service_name} is healthy at {health_url}")
+                    return True
+        except requests.RequestException:
+            # This is expected if the service isn't up yet
+            pass
+        except Exception as e:
+            print(f"An unexpected error occurred while checking {service_name}: {e}")
+
+        time.sleep(3) # Wait before retrying
+
+    print(f"🔥 Timed out waiting for {service_name} at {health_url}", file=sys.stderr)
+    return False
+
 # ---- Core Functions ----
 
-    
 def record_audio() -> Optional[io.BytesIO]:
-    """Records at a high sample rate and resamples down for Whisper."""
+    """Records audio using sounddevice, resampling for Whisper."""
     print(f"⏺ Recording for {RECORD_SECONDS} seconds at {RECORD_SAMPLE_RATE}Hz...")
     try:
-        # Record at the hardware-friendly sample rate
         recording = sd.rec(
             int(RECORD_SECONDS * RECORD_SAMPLE_RATE),
             samplerate=RECORD_SAMPLE_RATE,
             channels=1,
-            dtype='int16'
+            dtype='float32'
         )
         sd.wait()
 
         print("🎤 Resampling audio to 16000Hz for ASR...")
-        # Calculate the number of samples in the new audio
         num_samples = int(len(recording) * WHISPER_SAMPLE_RATE / RECORD_SAMPLE_RATE)
-        # Resample the audio
-        resampled_recording = resample_audio(recording, num_samples).astype(np.int16)
+        resampled_recording = resample_audio(recording, num_samples)
 
-        # Convert the RESAMPLED NumPy array to an in-memory WAV file
         buf = io.BytesIO()
-        write(buf, WHISPER_SAMPLE_RATE, resampled_recording) # Save with the correct Whisper sample rate
+        write(buf, WHISPER_SAMPLE_RATE, (resampled_recording * 32767).astype(np.int16))
         buf.seek(0)
-        print("✅ Recording complete and resampled.")
+        
+        print("✅ Recording complete.")
         return buf
+        
     except Exception as e:
         print(f"⚠ Audio recording failed: {e}", file=sys.stderr)
+        # We can add the traceback back in for good measure if this fails.
+        import traceback
+        traceback.print_exc()
         return None
 
-  
-def tts_play_wav_bytes(wav_bytes: bytes):
-    """Resamples and plays WAV audio bytes using sounddevice."""
-    try:
-        buf = io.BytesIO(wav_bytes)
-        original_sr, audio = read(buf)
-        
-        print(f"🔊 Resampling TTS audio from {original_sr}Hz to {PLAYBACK_SAMPLE_RATE}Hz...")
-        audio_float = audio.astype(np.float32) / 32768.0
-        num_samples = int(len(audio_float) * PLAYBACK_SAMPLE_RATE / original_sr)
-        audio_resampled = resample(audio_float, num_samples)
-        
-        sd.play(audio_resampled, PLAYBACK_SAMPLE_RATE)
-        sd.wait()
-    except Exception as e:
-        print(f"⚠ TTS playback failed: {e}", file=sys.stderr)
-
-def wait_for_health(name: str, url: str, path="/health", retries=10):
-    """Checks the health endpoint of a service, retrying on failure."""
-    full_url = f"{url}{path}"
-    print(f"🩺 Checking health of {name} at {full_url}...")
-    for i in range(1, retries + 1):
-        try:
-            r = requests.get(full_url, timeout=2)
-            r.raise_for_status()
-            print(f"✅ {name} healthy.")
-            return True
-        except Exception:
-            print(f"⏳ waiting for {name} ({i}/{retries})...")
-            time.sleep(SLEEP_SEC)
-    print(f"❌ {name} not healthy after {retries} retries.", file=sys.stderr)
-    return False
 
 def transcribe_audio(wav_obj: Optional[io.BytesIO]):
-    """Sends audio data to the ASR service and returns the transcribed text."""
     if not wav_obj:
         return None
         
-    # --- START DEBUGGING CHANGE ---
-    # Save the recorded audio to a file we can inspect.
-    # We'll save it in the tts voices directory as it's an easy volume to access.
     try:
         with open("/voices/last_recording.wav", "wb") as f:
             wav_obj.seek(0)
@@ -110,7 +107,6 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
         print("🎤 Saved recording to /voices/last_recording.wav for inspection.")
     except Exception as e:
         print(f"🔥 Failed to save debug audio file: {e}", file=sys.stderr)
-    # --- END DEBUGGING CHANGE ---
     
     print("📝 Transcribing audio via ASR...")
     try:
@@ -126,15 +122,12 @@ def transcribe_audio(wav_obj: Optional[io.BytesIO]):
         return None
 
 def query_rag_system(prompt_text: str):
-    """
-    Sends the user's input to the RAG Service and gets a synthesized answer.
-    """
     if not prompt_text:
         return None
     
     print("ORCHESTRATOR: Sending question to RAG Service...")
     try:
-        response = requests.post(f"{RAG_SERVICE_URL}/query", json={"input_text": prompt_text}, timeout=300) # Long timeout
+        response = requests.post(f"{RAG_SERVICE_URL}/query", json={"input_text": prompt_text}, timeout=300)
         response.raise_for_status()
         return response.json().get("response")
     except Exception as e:
@@ -142,9 +135,6 @@ def query_rag_system(prompt_text: str):
         return "Sorry, I had a problem processing that request."
 
 def speak_text(text: str, voice_path="/voices/my_voice.wav"):
-    """
-    Ensures the TTS model is loaded via the Resource Manager, then synthesizes speech.
-    """
     if not text:
         return
     try:
@@ -164,7 +154,7 @@ def speak_text(text: str, voice_path="/voices/my_voice.wav"):
 def main():
     """Main application loop."""
     print("🚀 Orchestrator starting.")
-    # Add the resource manager to the health checks
+
     if not all([
         wait_for_health("Resource Manager", RESOURCE_MANAGER_URL),
         wait_for_health("ASR Service", ASR_SERVICE_URL),

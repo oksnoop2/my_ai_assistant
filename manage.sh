@@ -255,7 +255,7 @@ run_services() {
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/tts-service ./tts-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/embedding-service ./embedding-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/rag-service ./rag-service
-    podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
+    podman build -q --no-cache --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
     echo "✅ Images built."
 
     mkdir -p ./volumes/asr/.cache ./volumes/tts/voices ./volumes/tts/model-cache \
@@ -277,7 +277,10 @@ run_services() {
     sleep 5
     
     echo -e "\n${ORANGE}Launching Orchestrator in the foreground...${NC}"
-    podman run -it --rm --name $ORCHESTRATOR_NAME --network $NETWORK_NAME --device /dev/snd \
+    # FINAL FIX: Corrected syntax for podman run command
+    podman run -it --rm --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
+      -v "/run/user/$(id -u)/pipewire-0:/run/user/$(id -u)/pipewire-0:ro" \
+      -v "./volumes/tts/voices:/voices:z" \
       -e PIPEWIRE_RUNTIME_DIR="/run/user/$(id -u)" \
       -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
       -e ASR_SERVICE_URL="http://$ASR_NAME:$ASR_INTERNAL_PORT" \
