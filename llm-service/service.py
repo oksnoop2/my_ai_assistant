@@ -69,8 +69,8 @@ def completion(request: dict):
         requests.post(f"{RESOURCE_MANAGER_URL}/acquire_gpu", timeout=300).raise_for_status()
         print("✅ GPU lock acquired by LLM Service.")
 
-        # Step 2: Perform inference (model is already on GPU)
-        output = llm(prompt, max_tokens=256, stop=["User:", "\n"], echo=False)
+
+        output = llm(prompt, max_tokens=256, stop=["User:"], echo=False)
         content = output["choices"][0]["text"].strip()
         return {"content": content}
 

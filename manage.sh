@@ -4,7 +4,7 @@
 # Unified Management Script for the AI Assistant Project ~
 #
 # USAGE:
-#   ./manage.sh run      - Builds and runs the main application stack.
+#   ./manage.sh run      - Builds and runs the main application stack with live logs.
 #   ./manage.sh commit   - Uses a dedicated, separate LLM to generate a commit message.
 #   ./manage.sh logs     - Tails the logs of all running services.
 #   ./manage.sh stop     - Stops and removes all project containers.
@@ -20,26 +20,24 @@ ASR_NAME="asr-service"             && ASR_PORT="8001" && ASR_INTERNAL_PORT="9000
 TTS_NAME="tts-service"             && TTS_PORT="8002" && TTS_INTERNAL_PORT="8000"
 EMBEDDING_NAME="embedding-service" && EMBEDDING_PORT="8003" && EMBEDDING_INTERNAL_PORT="8000"
 RAG_NAME="rag-service"             && RAG_PORT="8004" && RAG_INTERNAL_PORT="8000"
+EMOTION_CLASSIFIER_NAME="emotion-classifier-service" && EMOTION_CLASSIFIER_PORT="8005" && EMOTION_CLASSIFIER_INTERNAL_PORT="8000"
+PERSONA_NAME="persona-service"     && PERSONA_PORT="8006" && PERSONA_INTERNAL_PORT="8000"
 LLM_NAME="llm-service"             && LLM_PORT="8080" && LLM_INTERNAL_PORT="8080"
 NEO4J_NAME="neo4j-db"
 ORCHESTRATOR_NAME="orchestrator-service"
-# --- NEW: Add Emotion Classifier Service ---
-EMOTION_CLASSIFIER_NAME="emotion-classifier-service" && EMOTION_CLASSIFIER_PORT="8005" && EMOTION_CLASSIFIER_INTERNAL_PORT="8000"
-
 
 # --- Helper Service for Git Commits ---
 COMMIT_HELPER_NAME="commit-helper-service"
 COMMIT_LLM_NAME="commit-helper-llm"
 COMMIT_LLM_PORT="8081"
-# THIS IS THE PORT THE *HELPER* SERVICE USES INTERNALLY
 COMMIT_LLM_INTERNAL_PORT="8080"
 COMMIT_LLM_IMAGE="my-ai/commit-helper-service"
-# --- MODIFIED: Add new service to the list of all containers ---
-ALL_CONTAINERS="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $ORCHESTRATOR_NAME $COMMIT_LLM_NAME $EMOTION_CLASSIFIER_NAME"
+
+ALL_CONTAINERS="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $ORCHESTRATOR_NAME $COMMIT_LLM_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME"
 
 # --- Colors for logs ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m';
-MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[0;37m'; ORANGE='\033[0;93m'; NC='\033[0m'
+MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[0;37m'; ORANGE='\033[0;93m'; PURPLE='\033[0;35m'; NC='\033[0m'
 
 # ==============================================================================
 # CORE FUNCTIONS
@@ -47,7 +45,7 @@ MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[0;37m'; ORANGE='\033[0;93m'
 
 usage() {
     echo "USAGE:"
-    echo "  $0 run      - Builds and runs the main application stack."
+    echo "  $0 run      - Builds and runs the main application stack with live logs."
     echo "  $0 commit   - Uses a dedicated, separate LLM to generate a commit message."
     echo "  $0 logs     - Tails the logs of all running services."
     echo "  $0 stop     - Stops and removes all project containers."
@@ -64,7 +62,7 @@ dump_diagnostics() {
     echo "=================================================="
     echo "============== CONTAINER LOGS ===================="
     echo "=================================================="
-    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME; do
+    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME; do
         if podman container exists "$container"; then
             echo -e "\n${YELLOW}### LOGS FOR CONTAINER: $container ###${NC}"
             podman logs --tail 200 "$container" || echo "--> Failed to retrieve logs for $container."
@@ -103,12 +101,12 @@ tail_logs() {
         local padded_name=$(printf "%-20s" "$name")
         podman logs -f "$name" 2>&1 | awk -v name="$padded_name" -v color="$color" -v nc="$NC" '{ print color "[" name "] " nc $0 }' &
     }
-    # --- MODIFIED: Added the emotion classifier with a new color ---
     tail_log_helper "$RM_NAME" "$GREEN"; tail_log_helper "$ASR_NAME" "$BLUE"; tail_log_helper "$TTS_NAME" "$MAGENTA";
     tail_log_helper "$EMBEDDING_NAME" "$CYAN"; tail_log_helper "$RAG_NAME" "$YELLOW"; tail_log_helper "$LLM_NAME" "$RED";
-    tail_log_helper "$NEO4J_NAME" "$WHITE"; tail_log_helper "$EMOTION_CLASSIFIER_NAME" "$ORANGE";
+    tail_log_helper "$NEO4J_NAME" "$WHITE"; tail_log_helper "$EMOTION_CLASSIFIER_NAME" "$ORANGE"; tail_log_helper "$PERSONA_NAME" "$PURPLE";
 }
 
+# --- RESTORED: Commit helper functions ---
 start_commit_llm() {
     local build_image=false
     if ! podman image exists "$COMMIT_LLM_IMAGE"; then
@@ -187,38 +185,17 @@ auto_commit() {
     local PROMPT
     read -r -d '' PROMPT << EOM
 You are an expert programmer writing a Conventional Commit message. Your task is to summarize the code changes below.
-
 Follow these rules:
-1.  The message MUST follow the conventional commit format: \`<type\>(\<scope\>): \<subject\>\`.
-2.  Use the function name from the diff hunk (the text after '@@ ... @@') as the <scope>. If multiple functions are changed, use the most significant one.
-3.  The <subject> should be a concise, imperative summary of the change.
-4.  The body should explain the 'what' and 'why' of the changes. Do not mention filenames.
-
---- EXAMPLE ---
-
-Code Changes:
+1. The message MUST follow the conventional commit format: \`<type\>(\<scope\>): \<subject\>\`.
+2. Use the function name from the diff hunk (the text after '@@ ... @@') as the <scope>. If multiple functions are changed, use the most significant one.
+3. The <subject> should be a concise, imperative summary of the change.
+4. The body should explain the 'what' and 'why' of the changes. Do not mention filenames.
 ---
-@@ -42,7 +42,7 @@
- # --- Helper Service for Git Commits ---
- COMMIT_HELPER_NAME="commit-helper-service"
- COMMIT_LLM_NAME="commit-helper-llm"
--COMMIT_LLM_PORT="8081"
-+COMMIT_LLM_PORT="8082"
-
-Commit Message:
----
-fix(config): correct commit helper port to 8082
-
-The commit helper service was mapped to the wrong external port. This corrects the port mapping to align with the docker-compose configuration, fixing a connection issue.
-
---- ACTUAL TASK ---
-
 Code Changes:
 ---
 $DIFF_CONTENT
-
-Commit Message:
 ---
+Commit Message:
 EOM
 
     local JSON_PAYLOAD
@@ -242,7 +219,6 @@ EOM
     
     git commit -m "$COMMIT_MSG"
     
-    # --- PUSH LOGIC REMOVED ---
     echo -e "\n${GREEN}✅ Commit created locally. Push to remote using your Git client.${NC}"
 }
 
@@ -260,15 +236,15 @@ run_services() {
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/tts-service ./tts-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/embedding-service ./embedding-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/rag-service ./rag-service
-    # --- NEW: Build the emotion classifier image ---
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/emotion-classifier-service ./emotion-classifier-service
+    podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/persona-service ./persona-service
     podman build -q --no-cache --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
     echo "✅ Images built."
 
-    # --- MODIFIED: Add a cache directory for the new service ---
     mkdir -p ./volumes/asr/.cache ./volumes/tts/voices ./volumes/tts/model-cache \
            ./volumes/llm/gguf-models ./volumes/embedding/.cache ./volumes/neo4j/data \
-           ./volumes/rag/input_data ./volumes/rag/graph_data ./volumes/emotion-classifier/.cache
+           ./volumes/rag/input_data ./volumes/rag/graph_data ./volumes/emotion-classifier/.cache \
+           ./volumes/persona-service
 
     stop_services
 
@@ -280,14 +256,19 @@ run_services() {
     podman run --replace -d --name $LLM_NAME --network $NETWORK_NAME --gpus all -p $LLM_PORT:$LLM_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/llm/gguf-models:/models:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT"  my-ai/llm-service
     podman run --replace -d --name $TTS_NAME --network $NETWORK_NAME --gpus all -p $TTS_PORT:$TTS_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/tts/voices:/voices:z -v ./volumes/tts/model-cache:/root/.local/share/tts:z -e COQUI_TOS_AGREED=1 -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/tts-service
     podman run --replace -d --name $EMBEDDING_NAME --network $NETWORK_NAME --gpus all -p $EMBEDDING_PORT:$EMBEDDING_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/embedding/.cache:/root/.cache:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/embedding-service
-    # --- NEW: Run the emotion classifier service (no GPU needed) ---
     podman run --replace -d --name $EMOTION_CLASSIFIER_NAME --network $NETWORK_NAME -p $EMOTION_CLASSIFIER_PORT:$EMOTION_CLASSIFIER_INTERNAL_PORT -v ./volumes/emotion-classifier/.cache:/root/.cache:z my-ai/emotion-classifier-service
+    podman run --replace -d --name $PERSONA_NAME --network $NETWORK_NAME -p $PERSONA_PORT:$PERSONA_INTERNAL_PORT \
+      -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+      -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
+      -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
+      my-ai/persona-service
+      
     echo "✅ All background services started."
     
-    sleep 5
+    # --- NEW: Launch the real-time log viewer ---
+    tail_logs
     
     echo -e "\n${ORANGE}Launching Orchestrator in the foreground...${NC}"
-    # --- MODIFIED: Add the new service URL for the orchestrator to use in the future ---
     podman run -it --rm --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
       -v "/run/user/$(id -u)/pipewire-0:/run/user/$(id -u)/pipewire-0:ro" \
       -v "./volumes/tts/voices:/voices:z" \
@@ -298,6 +279,7 @@ run_services() {
       -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
       -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
       -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
+      -e PERSONA_SERVICE_URL="http://$PERSONA_NAME:$PERSONA_INTERNAL_PORT" \
       my-ai/orchestrator-service
 }
 
