@@ -10,6 +10,7 @@ from typing import Any, List, Optional, Sequence
 from fastapi import FastAPI, HTTPException
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from llama_index.core.node_parser import SentenceSplitter
 
 # --- LlamaIndex Imports ---
 import torch
@@ -177,20 +178,29 @@ class DocumentHandler(FileSystemEventHandler):
 def background_indexer():
     while True:
         filepath = indexing_queue.get()
+        # --- FIX #1: This flag will ensure we only set completion on true success ---
+        indexing_succeeded = False
         try:
             logging.info(f"Indexing '{filepath}'...")
             reader = SimpleDirectoryReader(input_files=[filepath])
             documents = reader.load_data()
+
+            # --- FIX #2: Revert to the simple, correct LlamaIndex pattern ---
+            # Pass the whole document. LlamaIndex will handle chunking and
+            # honor the `Settings.embed_batch_size = 64` automatically.
             for doc in documents:
-                # LlamaIndex will automatically use the batching we configured
-                # in the RESTfulEmbedding class and Settings.
                 kg_index.insert(doc)
+            
             logging.info(f"✅ Finished indexing '{filepath}'.")
+            # Mark success only after the loop completes without error
+            indexing_succeeded = True
+
         except Exception as e:
-            logging.error(f"❌ Indexing failed for '{filepath}': {e}")
+            logging.error(f"❌ Indexing failed for '{filepath}': {e}", exc_info=True)
         finally:
             indexing_queue.task_done()
-            if indexing_queue.empty():
+            # --- FIX #3: Only set the completion event if the queue is empty AND this file was indexed successfully ---
+            if indexing_queue.empty() and indexing_succeeded:
                 logging.info("✅ Initial document indexing complete.")
                 INDEXING_COMPLETE.set()
 

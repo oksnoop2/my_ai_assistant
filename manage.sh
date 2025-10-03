@@ -23,6 +23,9 @@ RAG_NAME="rag-service"             && RAG_PORT="8004" && RAG_INTERNAL_PORT="8000
 LLM_NAME="llm-service"             && LLM_PORT="8080" && LLM_INTERNAL_PORT="8080"
 NEO4J_NAME="neo4j-db"
 ORCHESTRATOR_NAME="orchestrator-service"
+# --- NEW: Add Emotion Classifier Service ---
+EMOTION_CLASSIFIER_NAME="emotion-classifier-service" && EMOTION_CLASSIFIER_PORT="8005" && EMOTION_CLASSIFIER_INTERNAL_PORT="8000"
+
 
 # --- Helper Service for Git Commits ---
 COMMIT_HELPER_NAME="commit-helper-service"
@@ -31,7 +34,8 @@ COMMIT_LLM_PORT="8081"
 # THIS IS THE PORT THE *HELPER* SERVICE USES INTERNALLY
 COMMIT_LLM_INTERNAL_PORT="8080"
 COMMIT_LLM_IMAGE="my-ai/commit-helper-service"
-ALL_CONTAINERS="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $ORCHESTRATOR_NAME $COMMIT_LLM_NAME"
+# --- MODIFIED: Add new service to the list of all containers ---
+ALL_CONTAINERS="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $ORCHESTRATOR_NAME $COMMIT_LLM_NAME $EMOTION_CLASSIFIER_NAME"
 
 # --- Colors for logs ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m';
@@ -60,7 +64,7 @@ dump_diagnostics() {
     echo "=================================================="
     echo "============== CONTAINER LOGS ===================="
     echo "=================================================="
-    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME; do
+    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME; do
         if podman container exists "$container"; then
             echo -e "\n${YELLOW}### LOGS FOR CONTAINER: $container ###${NC}"
             podman logs --tail 200 "$container" || echo "--> Failed to retrieve logs for $container."
@@ -99,9 +103,10 @@ tail_logs() {
         local padded_name=$(printf "%-20s" "$name")
         podman logs -f "$name" 2>&1 | awk -v name="$padded_name" -v color="$color" -v nc="$NC" '{ print color "[" name "] " nc $0 }' &
     }
+    # --- MODIFIED: Added the emotion classifier with a new color ---
     tail_log_helper "$RM_NAME" "$GREEN"; tail_log_helper "$ASR_NAME" "$BLUE"; tail_log_helper "$TTS_NAME" "$MAGENTA";
     tail_log_helper "$EMBEDDING_NAME" "$CYAN"; tail_log_helper "$RAG_NAME" "$YELLOW"; tail_log_helper "$LLM_NAME" "$RED";
-    tail_log_helper "$NEO4J_NAME" "$WHITE";
+    tail_log_helper "$NEO4J_NAME" "$WHITE"; tail_log_helper "$EMOTION_CLASSIFIER_NAME" "$ORANGE";
 }
 
 start_commit_llm() {
@@ -255,12 +260,15 @@ run_services() {
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/tts-service ./tts-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/embedding-service ./embedding-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/rag-service ./rag-service
+    # --- NEW: Build the emotion classifier image ---
+    podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/emotion-classifier-service ./emotion-classifier-service
     podman build -q --no-cache --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
     echo "✅ Images built."
 
+    # --- MODIFIED: Add a cache directory for the new service ---
     mkdir -p ./volumes/asr/.cache ./volumes/tts/voices ./volumes/tts/model-cache \
            ./volumes/llm/gguf-models ./volumes/embedding/.cache ./volumes/neo4j/data \
-           ./volumes/rag/input_data ./volumes/rag/graph_data
+           ./volumes/rag/input_data ./volumes/rag/graph_data ./volumes/emotion-classifier/.cache
 
     stop_services
 
@@ -272,12 +280,14 @@ run_services() {
     podman run --replace -d --name $LLM_NAME --network $NETWORK_NAME --gpus all -p $LLM_PORT:$LLM_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/llm/gguf-models:/models:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT"  my-ai/llm-service
     podman run --replace -d --name $TTS_NAME --network $NETWORK_NAME --gpus all -p $TTS_PORT:$TTS_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/tts/voices:/voices:z -v ./volumes/tts/model-cache:/root/.local/share/tts:z -e COQUI_TOS_AGREED=1 -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/tts-service
     podman run --replace -d --name $EMBEDDING_NAME --network $NETWORK_NAME --gpus all -p $EMBEDDING_PORT:$EMBEDDING_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/embedding/.cache:/root/.cache:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/embedding-service
+    # --- NEW: Run the emotion classifier service (no GPU needed) ---
+    podman run --replace -d --name $EMOTION_CLASSIFIER_NAME --network $NETWORK_NAME -p $EMOTION_CLASSIFIER_PORT:$EMOTION_CLASSIFIER_INTERNAL_PORT -v ./volumes/emotion-classifier/.cache:/root/.cache:z my-ai/emotion-classifier-service
     echo "✅ All background services started."
     
     sleep 5
     
     echo -e "\n${ORANGE}Launching Orchestrator in the foreground...${NC}"
-    # FINAL FIX: Corrected syntax for podman run command
+    # --- MODIFIED: Add the new service URL for the orchestrator to use in the future ---
     podman run -it --rm --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
       -v "/run/user/$(id -u)/pipewire-0:/run/user/$(id -u)/pipewire-0:ro" \
       -v "./volumes/tts/voices:/voices:z" \
@@ -287,6 +297,7 @@ run_services() {
       -e TTS_SERVICE_URL="http://$TTS_NAME:$TTS_INTERNAL_PORT" \
       -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
       -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+      -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
       my-ai/orchestrator-service
 }
 
