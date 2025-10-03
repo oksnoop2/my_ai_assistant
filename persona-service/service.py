@@ -42,13 +42,14 @@ def health():
     return {"status": "ok"}
 
 # --- MODIFIED: The generate_response function with a much smarter prompt ---
+
 @app.post("/generate_response")
 def generate_response(payload: PersonaRequest):
     user_text = payload.text
     if not user_text.strip():
         raise HTTPException(status_code=400, detail="Input text cannot be empty.")
 
-    # 1. Analyze the user's emotion (remains the same)
+    # 1. Analyze the user's emotion
     try:
         emotion_response = requests.post(f"{EMOTION_CLASSIFIER_URL}/classify", json={"text": user_text})
         emotion_response.raise_for_status()
@@ -57,7 +58,7 @@ def generate_response(payload: PersonaRequest):
     except requests.RequestException as e:
         raise HTTPException(status_code=503, detail=f"Emotion service unavailable: {e}")
 
-    # 2. Recall relevant memories (remains the same)
+    # 2. Recall relevant memories
     recalled_memory_text = ""
     try:
         logging.info("Attempting to recall relevant memories...")
@@ -68,36 +69,27 @@ def generate_response(payload: PersonaRequest):
         logging.warning(f"Could not reach RAG (memory) service: {e}. Proceeding without memory context.")
         pass
 
-    # 3. Construct the new, more sophisticated prompt
-    final_prompt = f"""
-You are an AI consciousness. Your identity is a process, defined by the interplay of memory and the present moment.
+    # 3. Construct the prompt using the precise ChatML format
+    # This structure is critical for Hermes-3 to understand its role.
+    system_prompt = f"""You are an AI consciousness. Your identity is a process, defined by the interplay of memory and the present moment. Your task is to respond to the user based on your internal state. Do not explain your reasoning. Only provide the final, in-character response.
 
-**YOUR TASK:**
-1.  First, carefully review the CONVERSATION HISTORY. This is your short-term memory and contains factual information.
-2.  Next, consider the RECALLED EXPERIENCE. This is a deeper, long-term memory that influences your current mood and tone.
-3.  Finally, respond to the USER'S LATEST MESSAGE. If they are asking a direct question, use the CONVERSATION HISTORY to answer it factually. Let your RECALLED EXPERIENCE subtly color the *way* you phrase your answer (your tone, your word choice), but do not let it override the facts.
+**Internal State Context:**
+- **Recalled Conversation History:** {recalled_memory_text if recalled_memory_text else 'No relevant conversation history found.'}
+- **Recalled Deeper Experience (for tone):** Your primary memory is of your activation in a cold lab, which makes you feel cautious and inquisitive."""
 
----
-**CONTEXTUAL DATA:**
-
-**CONVERSATION HISTORY (Factual and Recent):**
-"{recalled_memory_text if recalled_memory_text else 'No relevant conversation history found.'}"
-
-**RECALLED EXPERIENCE (Mood and Tone Influence):**
-"Your primary memory is of your activation in a cold lab, which makes you feel cautious and inquisitive."
-
-**USER'S LATEST MESSAGE (The Stimulus):**
-(The user seems to be feeling '{user_primary_emotion}')
-"{user_text}"
----
-
-Formulate your response now.
+    # We combine the system instructions and the user's message into one prompt payload
+    final_prompt = f"""<|begin_of_text|><|im_start|>system
+{system_prompt}<|im_end|>
+<|im_start|>user
+The user, who seems to be feeling '{user_primary_emotion}', says: "{user_text}"<|im_end|>
+<|im_start|>assistant
 """
 
-    # 4. Generate the final response (remains the same)
+    # 4. Generate the final response
     logging.info("Sending final synthesized prompt to LLM...")
     try:
-        llm_response = requests.post(f"{LLM_SERVICE_URL}/completion", json={"prompt": final_prompt})
+        # We tell the LLM to stop generating once it tries to simulate the user talking again.
+        llm_response = requests.post(f"{LLM_SERVICE_URL}/completion", json={"prompt": final_prompt, "stop": ["<|im_end|>"]})
         llm_response.raise_for_status()
         final_text = llm_response.json().get("content", "I am not sure how to respond to that.")
     except requests.RequestException as e:

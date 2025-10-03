@@ -10,8 +10,7 @@ app = FastAPI()
 
 # --- Globals ---
 llm = None
-MODEL_PATH = "/models/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
-# ADD THIS: Get the resource manager URL from environment variables
+MODEL_PATH = "/models/Hermes-3-Llama-3.1-8B-Q4_K_M.gguf"
 RESOURCE_MANAGER_URL = os.environ["RESOURCE_MANAGER_URL"]
 
 @app.get("/health")
@@ -31,7 +30,8 @@ def load_model():
                 n_gpu_layers=-1,
                 n_ctx=4096,
                 verbose=True,
-                n_threads=16
+                n_threads=16,
+                chat_format="chatml"
             )
             print("✅ LLM model loaded.")
         except Exception as e:
