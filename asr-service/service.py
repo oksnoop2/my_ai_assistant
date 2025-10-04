@@ -10,7 +10,7 @@ import tempfile
 # Check for GPU and load the Whisper model.
 # "base" is a good starting point. You can use "small" or "medium" for more
 # accuracy if you have enough VRAM and memory.
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda"
 model_size = "base"
 
 print(f"🚀 ASR service starting on device: {device}")

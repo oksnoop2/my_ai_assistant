@@ -53,6 +53,13 @@ dump_diagnostics() {
     echo "=================================================="
     echo "============== SYSTEM & GPU STATE =============="
     echo "=================================================="
+    # Check GPU availability
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi || echo "nvidia-smi failed"
+    else
+        echo "nvidia-smi not found"
+    fi
+    echo ""
     dmesg | tail -n 50 && echo "" && podman stats --no-stream
     echo "=================================================="
     echo "============== CONTAINER LOGS ===================="
@@ -126,7 +133,32 @@ tail_logs() {
     done
 }
 
+check_gpu_support() {
+    # Check if GPU support is available
+    if ! command -v nvidia-smi &> /dev/null; then
+        echo -e "${YELLOW}⚠️  nvidia-smi not found. GPU support may not be available.${NC}"
+        echo "If you have an NVIDIA GPU, please install the NVIDIA drivers and container toolkit."
+        return 1
+    fi
+    
+    # Test if containers can access GPU
+    echo -e "${CYAN}Testing GPU access in container...${NC}"
+    if podman run --rm --gpus all --security-opt=label=disable nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 nvidia-smi &>/dev/null; then
+        echo -e "${GREEN}✅ GPU access confirmed in containers.${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ GPU access failed in containers. Checking container toolkit...${NC}"
+        echo "Please ensure nvidia-container-toolkit is installed and configured for podman."
+        echo "Run: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+        return 1
+    fi
+}
+
 start_all_services() {
+    echo -e "${GREEN}### CHECKING GPU SUPPORT ###${NC}"
+    check_gpu_support
+    GPU_AVAILABLE=$?
+
     echo -e "${GREEN}### PREPARING NETWORK ###${NC}"
     podman network create $NETWORK_NAME &>/dev/null || true
 
@@ -151,14 +183,77 @@ start_all_services() {
     stop_services
 
     echo -e "${GREEN}### STARTING ALL SERVICES IN BACKGROUND ###${NC}"
-    podman run --replace -d --name $RM_NAME --network $NETWORK_NAME -p $RM_PORT:$RM_INTERNAL_PORT -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" -e TTS_SERVICE_URL="http://$TTS_NAME:$TTS_INTERNAL_PORT" -e EMBEDDING_SERVICE_URL="http://$EMBEDDING_NAME:$EMBEDDING_INTERNAL_PORT" my-ai/resource-manager-service
-    podman run --replace -d --name $ASR_NAME --network $NETWORK_NAME -p $ASR_PORT:$ASR_INTERNAL_PORT --gpus all -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/asr/.cache:/root/.cache:z my-ai/asr-service
-    podman run --replace -d --name $NEO4J_NAME --network $NETWORK_NAME -v ./volumes/neo4j/data:/data:z -e NEO4J_AUTH=none -e NEO4J_PLUGINS='["apoc"]' docker.io/library/neo4j:latest
-    podman run --replace -d --name $RAG_NAME --network $NETWORK_NAME -p $RAG_PORT:$RAG_INTERNAL_PORT --gpus all -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/rag/input_data:/app/input_data:z -e NEO4J_URI="bolt://$NEO4J_NAME:7687" -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" -e EMBEDDING_SERVICE_URL="http://$EMBEDDING_NAME:$EMBEDDING_INTERNAL_PORT" -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/rag-service
-    podman run --replace -d --name $LLM_NAME --network $NETWORK_NAME --gpus all -p $LLM_PORT:$LLM_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/llm/gguf-models:/models:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT"  my-ai/llm-service
-    podman run --replace -d --name $TTS_NAME --network $NETWORK_NAME --gpus all -p $TTS_PORT:$TTS_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/tts/voices:/voices:z -v ./volumes/tts/model-cache:/root/.local/share/tts:z -e COQUI_TOS_AGREED=1 -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/tts-service
-    podman run --replace -d --name $EMBEDDING_NAME --network $NETWORK_NAME --gpus all -p $EMBEDDING_PORT:$EMBEDDING_INTERNAL_PORT -e NVIDIA_VISIBLE_DEVICES=all -v ./volumes/embedding/.cache:/root/.cache:z -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" my-ai/embedding-service
-    podman run --replace -d --name $EMOTION_CLASSIFIER_NAME --network $NETWORK_NAME -p $EMOTION_CLASSIFIER_PORT:$EMOTION_CLASSIFIER_INTERNAL_PORT -v ./volumes/emotion-classifier/.cache:/root/.cache:z my-ai/emotion-classifier-service
+    
+    # Set GPU flags based on availability
+    if [ $GPU_AVAILABLE -eq 0 ]; then
+        GPU_FLAGS="--gpus all --security-opt=label=disable -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all"
+        echo -e "${GREEN}Starting services with GPU support enabled.${NC}"
+    else
+        GPU_FLAGS=""
+        echo -e "${YELLOW}Starting services without GPU support (CPU mode).${NC}"
+    fi
+
+    # Resource Manager (no GPU needed)
+    podman run --replace -d --name $RM_NAME --network $NETWORK_NAME -p $RM_PORT:$RM_INTERNAL_PORT \
+      -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+      -e TTS_SERVICE_URL="http://$TTS_NAME:$TTS_INTERNAL_PORT" \
+      -e EMBEDDING_SERVICE_URL="http://$EMBEDDING_NAME:$EMBEDDING_INTERNAL_PORT" \
+      my-ai/resource-manager-service
+    
+    # ASR Service (GPU-enabled)
+    podman run --replace -d --name $ASR_NAME --network $NETWORK_NAME -p $ASR_PORT:$ASR_INTERNAL_PORT \
+      $GPU_FLAGS \
+      -v ./volumes/asr/.cache:/root/.cache:z \
+      -v ./volumes/llm/gguf-models:/models:z \
+      -v ./volumes/tts/voices:/voices:z \
+      my-ai/asr-service
+    
+    # Neo4j (no GPU needed)
+    podman run --replace -d --name $NEO4J_NAME --network $NETWORK_NAME \
+      -v ./volumes/neo4j/data:/data:z \
+      -e NEO4J_AUTH=none \
+      -e NEO4J_PLUGINS='["apoc"]' \
+      docker.io/library/neo4j:latest
+    
+    # RAG Service (GPU-enabled)
+    podman run --replace -d --name $RAG_NAME --network $NETWORK_NAME -p $RAG_PORT:$RAG_INTERNAL_PORT \
+      $GPU_FLAGS \
+      -v ./volumes/rag/input_data:/app/input_data:z \
+      -e NEO4J_URI="bolt://$NEO4J_NAME:7687" \
+      -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+      -e EMBEDDING_SERVICE_URL="http://$EMBEDDING_NAME:$EMBEDDING_INTERNAL_PORT" \
+      -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+      my-ai/rag-service
+    
+    # LLM Service (GPU-enabled)
+    podman run --replace -d --name $LLM_NAME --network $NETWORK_NAME -p $LLM_PORT:$LLM_INTERNAL_PORT \
+      $GPU_FLAGS \
+      -v ./volumes/llm/gguf-models:/models:z \
+      -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+      my-ai/llm-service
+    
+    # TTS Service (GPU-enabled)
+    podman run --replace -d --name $TTS_NAME --network $NETWORK_NAME -p $TTS_PORT:$TTS_INTERNAL_PORT \
+      $GPU_FLAGS \
+      -v ./volumes/tts/voices:/voices:z \
+      -v ./volumes/tts/model-cache:/root/.local/share/tts:z \
+      -e COQUI_TOS_AGREED=1 \
+      -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+      my-ai/tts-service
+    
+    # Embedding Service (GPU-enabled)
+    podman run --replace -d --name $EMBEDDING_NAME --network $NETWORK_NAME -p $EMBEDDING_PORT:$EMBEDDING_INTERNAL_PORT \
+      $GPU_FLAGS \
+      -v ./volumes/embedding/.cache:/root/.cache:z \
+      -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+      my-ai/embedding-service
+    
+    # Emotion Classifier (CPU only)
+    podman run --replace -d --name $EMOTION_CLASSIFIER_NAME --network $NETWORK_NAME -p $EMOTION_CLASSIFIER_PORT:$EMOTION_CLASSIFIER_INTERNAL_PORT \
+      -v ./volumes/emotion-classifier/.cache:/root/.cache:z \
+      my-ai/emotion-classifier-service
+    
+    # Persona Service (no GPU needed)
     podman run --replace -d --name $PERSONA_NAME --network $NETWORK_NAME -p $PERSONA_PORT:$PERSONA_INTERNAL_PORT \
       -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
       -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
@@ -180,15 +275,24 @@ start_commit_llm() {
     if [ "$build_image" = true ]; then
         echo -e "${CYAN}### Building dedicated commit helper image... ###${NC}"; podman build -t "$COMMIT_LLM_IMAGE" "./$COMMIT_HELPER_NAME";
     fi
+    
+    # Check GPU availability for commit helper
+    if [ $GPU_AVAILABLE -eq 0 ]; then
+        GPU_FLAGS="--gpus all --security-opt=label=disable"
+    else
+        GPU_FLAGS=""
+    fi
+    
     if ! podman container exists "$COMMIT_LLM_NAME" || [ "$(podman inspect -f '{{.State.Status}}' "$COMMIT_LLM_NAME")" != "running" ]; then
         echo -e "${CYAN}### Starting dedicated commit helper LLM... ###${NC}"
-        podman run --replace -d --name "$COMMIT_LLM_NAME" --network "$NETWORK_NAME" --gpus all \
+        podman run --replace -d --name "$COMMIT_LLM_NAME" --network "$NETWORK_NAME" $GPU_FLAGS \
           -p "$COMMIT_LLM_PORT:$COMMIT_LLM_INTERNAL_PORT" -v "./volumes/llm/gguf-models:/models:z" "$COMMIT_LLM_IMAGE"
         echo "Waiting for helper LLM server..."; until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$COMMIT_LLM_PORT/health")" = "200" ]; do sleep 1; done; echo "✅ LLM Server is running."
         echo "⏳ Triggering model load in helper LLM..."; sleep 1; curl -s --max-time 180 -X POST "http://localhost:$COMMIT_LLM_PORT/load" > /dev/null
         echo "Waiting for model to load..."; until curl -s "http://localhost:$COMMIT_LLM_PORT/health" | jq -e '.model_loaded == true' > /dev/null; do printf "."; sleep 1; done; echo -e "\n✅ Commit helper model is loaded and ready."
     else echo "✅ Commit helper is already running."; fi
 }
+
 auto_commit() {
     trap 'echo -e "\n${ORANGE}### Stopping commit helper service... ###${NC}"; podman stop "$COMMIT_LLM_NAME" &>/dev/null' RETURN
     echo -e "${GREEN}### CHECKING FOR CHANGES ###${NC}"; if [[ -z $(git status --porcelain) ]]; then echo "✅ No changes detected."; return; fi
@@ -228,19 +332,16 @@ case "$1" in
             exit 1
         fi
 
-if [ -z "$TMUX" ]; then
-    # --- FIX: Kill any existing session with the same name first ---
-    if tmux has-session -t "my-ai-assistant" 2>/dev/null; then
-        echo "Killing existing tmux session..."
-        tmux kill-session -t "my-ai-assistant"
-    fi
-    # --- END FIX ---
-    echo "Relaunching in a new tmux session..."
-    exec tmux new-session -s "my-ai-assistant" "./manage.sh run"
-    exit 0
-fi
+        if [ -z "$TMUX" ]; then
+            if tmux has-session -t "my-ai-assistant" 2>/dev/null; then
+                echo "Killing existing tmux session..."
+                tmux kill-session -t "my-ai-assistant"
+            fi
+            echo "Relaunching in a new tmux session..."
+            exec tmux new-session -s "my-ai-assistant" "./manage.sh run"
+            exit 0
+        fi
 
-        # When Ctrl+C is pressed inside tmux, it will kill the whole session.
         trap "stop_services true" SIGINT ERR
         start_all_services
         
@@ -250,21 +351,20 @@ fi
         tmux send-keys -t 1 "./manage.sh logs" C-m 
         
         tmux select-pane -t 0
-echo -e "\n${ORANGE}Starting orchestrator in interactive mode...${NC}"
+        echo -e "\n${ORANGE}Starting orchestrator in interactive mode...${NC}"
 
-# This is the podman run command from start_all_services, with the "-d" flag REMOVED.
-podman run --replace -it --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
-  -v "/run/user/$(id -u)/pipewire-0:/run/user/$(id -u)/pipewire-0:ro" \
-  -v "./volumes/tts/voices:/voices:z" \
-  -e PIPEWIRE_RUNTIME_DIR="/run/user/$(id -u)" \
-  -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
-  -e ASR_SERVICE_URL="http://$ASR_NAME:$ASR_INTERNAL_PORT" \
-  -e TTS_SERVICE_URL="http://$TTS_NAME:$TTS_INTERNAL_PORT" \
-  -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
-  -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
-  -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
-  -e PERSONA_SERVICE_URL="http://$PERSONA_NAME:$PERSONA_INTERNAL_PORT" \
-  my-ai/orchestrator-service
+        podman run --replace -it --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
+          -v "/run/user/$(id -u)/pipewire-0:/run/user/$(id -u)/pipewire-0:ro" \
+          -v "./volumes/tts/voices:/voices:z" \
+          -e PIPEWIRE_RUNTIME_DIR="/run/user/$(id -u)" \
+          -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+          -e ASR_SERVICE_URL="http://$ASR_NAME:$ASR_INTERNAL_PORT" \
+          -e TTS_SERVICE_URL="http://$TTS_NAME:$TTS_INTERNAL_PORT" \
+          -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
+          -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+          -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
+          -e PERSONA_SERVICE_URL="http://$PERSONA_NAME:$PERSONA_INTERNAL_PORT" \
+          my-ai/orchestrator-service
         ;;
     start)
         start_all_services
@@ -289,7 +389,6 @@ podman run --replace -it --name $ORCHESTRATOR_NAME --network $NETWORK_NAME \
         wait
         ;;
     stop)
-        # The 'true' argument tells stop_services to also kill tmux.
         stop_services true
         ;;
     clean)

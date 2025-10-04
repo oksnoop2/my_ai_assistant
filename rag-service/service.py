@@ -172,21 +172,49 @@ def health():
         return {"status": "ok", "index_ready": True}
     return {"status": "starting", "index_ready": False}
 
+
 @app.post("/query")
 def query_system(payload: dict):
+    """
+    This endpoint now acts as a pure RETRIEVER.
+    It finds relevant memories in the knowledge graph but does NOT synthesize
+    a final answer. It returns the raw text of the retrieved memories.
+    """
     input_text = payload.get("input_text")
-    if not input_text: raise HTTPException(status_code=400, detail="No input_text provided.")
-    if not INDEXING_COMPLETE.is_set(): raise HTTPException(status_code=503, detail="Index is not ready.")
+    if not input_text:
+        raise HTTPException(status_code=400, detail="No input_text provided.")
+    if not INDEXING_COMPLETE.is_set():
+        raise HTTPException(status_code=503, detail="Index is not ready.")
+    
     try:
-        logging.info(f"Received input: '{input_text}'")
-        query_engine = kg_index.as_query_engine(retriever_mode="hybrid", similarity_top_k=5)
-        response = query_engine.query(input_text)
-        final_response = str(response)
-        logging.info(f"⬅️  Received synthesized response: '{final_response}'")
-        return {"response": final_response}
+        logging.info(f"🔎 Retrieving memories for: '{input_text}'")
+
+        # Step 1: Create a retriever instead of a full query engine.
+        # This object is responsible only for fetching relevant nodes.
+        # We can also reduce the top_k to be more focused, as you suggested.
+        retriever = kg_index.as_retriever(
+            retriever_mode="hybrid",
+            similarity_top_k=3  # Reduced from 5 to be more focused
+        )
+
+        # Step 2: Call .retrieve() instead of .query().
+        # This returns a list of NodeWithScore objects, not a synthesized response.
+        retrieved_nodes = retriever.retrieve(input_text)
+
+        # Step 3: Extract the raw text from each node.
+        # This is the "pile of documents" we will hand to the persona service.
+        raw_memories = [node.get_content() for node in retrieved_nodes]
+
+        logging.info(f"⬅️  Retrieved {len(raw_memories)} raw memories.")
+
+        # Step 4: Return the memories as a list of strings.
+        # The key is changed to "retrieved_memories" to be more descriptive.
+        return {"retrieved_memories": raw_memories}
+
     except Exception as e:
-        logging.error(f"Error during query: {e}", exc_info=True)
+        logging.error(f"❌ Error during retrieval: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- NEW: Endpoint for adding new memories from conversations ---
 class MemoryRequest(BaseModel):
