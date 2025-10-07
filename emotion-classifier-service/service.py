@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from transformers import pipeline
 import logging
 import sys
+from typing import List
 
 # --- Logging Setup ---
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -17,7 +18,7 @@ class ClassificationRequest(BaseModel):
 # This will hold our loaded model pipeline
 emotion_classifier = None
 MODEL_NAME = "j-hartmann/emotion-english-distilroberta-base"
-
+EMOTION_ORDER = ['anger', 'disgust', 'fear', 'joy', 'neutral', 'sadness', 'surprise']
 # --- FastAPI App ---
 app = FastAPI(title="Emotion Classification Service")
 
@@ -48,29 +49,38 @@ def health():
 @app.post("/classify")
 def classify_emotion(payload: ClassificationRequest):
     """
-    Receives text and returns a list of all emotions and their corresponding scores.
+    Receives text and returns a list of all emotions, their scores,
+    and a fixed-order vector of the scores.
     """
     if emotion_classifier is None:
         raise HTTPException(status_code=503, detail="Model is not ready.")
     
     if not payload.text or not payload.text.strip():
-        raise HTTPException(status_code=400, detail="Text for classification cannot be empty.")
+        # Return a neutral vector for empty text
+        neutral_vector = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        return {
+            "scores": [{"emotion": "neutral", "score": 1.0}],
+            "emotion_vector": neutral_vector
+        }
 
     try:
         logging.info(f"Classifying text: '{payload.text}'")
         
-        # --- MODIFIED: Process the new, more detailed output format. ---
-        # The pipeline now returns a nested list: [[{'label': 'anger', 'score': ...}, ...]]
         results = emotion_classifier(payload.text)
-        scores = results[0] # This gets the inner list of score dictionaries
-
-        # For consistency and clarity in our API, we'll rename the 'label' key to 'emotion'
-        formatted_scores = [{"emotion": item["label"], "score": item["score"]} for item in scores]
-
-        logging.info(f"✅ Classification result: {formatted_scores}")
         
-        # Return the full list of scores
-        return {"scores": formatted_scores}
+        # Original formatted scores for human readability
+        formatted_scores = [{"emotion": item["label"], "score": item["score"]} for item in results[0]]
+
+        # Create a dictionary for quick lookups
+        scores_dict = {item["label"]: item["score"] for item in results[0]}
+
+        # Create the fixed-order vector for machine use
+        scores_vector = [scores_dict.get(emotion, 0.0) for emotion in EMOTION_ORDER]
+        
+        logging.info(f"✅ Classification result vector: {scores_vector}")
+        
+        # Return both formats
+        return {"scores": formatted_scores, "emotion_vector": scores_vector}
 
     except Exception as e:
         logging.error(f"❌ Error during classification: {e}")

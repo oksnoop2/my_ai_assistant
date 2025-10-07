@@ -170,7 +170,7 @@ start_all_services() {
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/embedding-service ./embedding-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/rag-service ./rag-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/emotion-classifier-service ./emotion-classifier-service
-    podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/persona-service ./persona-service
+    podman build --no-cache -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/persona-service ./persona-service
     podman build -q --no-cache --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
     echo "✅ Images built."
 
