@@ -11,6 +11,7 @@ from scipy.signal import resample as resample_audio
 from typing import Optional
 import threading # <-- NEW: Import threading
 import re
+import logging
 
 # ---- Service URLs and Configuration ----
 try:
@@ -20,6 +21,7 @@ try:
     TTS_SERVICE_URL = os.environ["TTS_SERVICE_URL"]
     RAG_SERVICE_URL = os.environ["RAG_SERVICE_URL"]
     LLM_SERVICE_URL = os.environ["LLM_SERVICE_URL"]
+    EMOTION_CLASSIFIER_URL = os.environ["EMOTION_CLASSIFIER_URL"]
     PERSONA_SERVICE_URL = os.environ["PERSONA_SERVICE_URL"]
 except KeyError as e:
     print(f"🔥 Critical environment variable missing: {e}", file=sys.stderr)
@@ -161,11 +163,11 @@ def save_memory_async(memory_text: str):
         emotion_vector = emotion_data.get("emotion_vector")
 
         if not emotion_vector:
-            logging.warning("Could not get emotion vector for memory. Skipping emotional context.")
+            print("⚠️ Could not get emotion vector for memory. Skipping emotional context.")
             return
 
         # 2. Send the memory text AND its new emotional vector to the RAG service.
-        logging.info(f"✅ Emotional fingerprint analyzed. Sending to RAG service for storage...")
+        print(f"✅ Emotional fingerprint analyzed. Sending to RAG service for storage...")
         requests.post(
             f"{RAG_SERVICE_URL}/add_memory", 
             json={"text": memory_text, "emotion_vector": emotion_vector}, 

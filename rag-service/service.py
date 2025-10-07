@@ -256,7 +256,7 @@ async def add_memory(payload: MemoryRequest):
             metadata={"emotion_vector": payload.emotion_vector}
         )
         
-        kg_index.insert(documents=[new_memory_doc])
+        kg_index.insert(document=new_memory_doc)
         logging.info("✅ New blended memory has been successfully added to the knowledge graph.")
         return {"status": "blended_memory_added"}
         
