@@ -16,7 +16,8 @@ COPY . .
 RUN pip3 install --no-cache-dir \
     fastapi \
     uvicorn \
-    requests
+    requests \
+    numpy
 
 EXPOSE 8000
 

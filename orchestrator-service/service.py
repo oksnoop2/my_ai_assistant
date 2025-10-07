@@ -146,19 +146,35 @@ def speak_text(text: str, voice_path="/voices/my_voice.wav"):
 # --- NEW: Function to save memories in the background ---
 def save_memory_async(memory_text: str):
     """
-    Sends the conversational turn to the RAG service to be stored as a memory.
-    Runs in a separate thread to not block the main loop.
+    Analyzes the emotion of the full conversational turn and sends the memory
+    with its emotional vector to the RAG service.
     """
     if not memory_text:
         return
-    print("🧠 Saving conversational turn to memory...")
-    try:
-        # This is a "fire-and-forget" call. We don't wait for the response.
-        requests.post(f"{RAG_SERVICE_URL}/add_memory", json={"text": memory_text}, timeout=60)
-        print("✅ Memory sent for storage.")
-    except requests.RequestException as e:
-        print(f"⚠️  Could not save memory: {e}", file=sys.stderr)
 
+    print("🧠 Analyzing emotional fingerprint of the exchange before saving memory...")
+    try:
+        # 1. Call the emotion classifier on the COMPLETE exchange.
+        emotion_response = requests.post(f"{EMOTION_CLASSIFIER_URL}/classify", json={"text": memory_text}, timeout=60)
+        emotion_response.raise_for_status()
+        emotion_data = emotion_response.json()
+        emotion_vector = emotion_data.get("emotion_vector")
+
+        if not emotion_vector:
+            logging.warning("Could not get emotion vector for memory. Skipping emotional context.")
+            return
+
+        # 2. Send the memory text AND its new emotional vector to the RAG service.
+        logging.info(f"✅ Emotional fingerprint analyzed. Sending to RAG service for storage...")
+        requests.post(
+            f"{RAG_SERVICE_URL}/add_memory", 
+            json={"text": memory_text, "emotion_vector": emotion_vector}, 
+            timeout=60
+        )
+        print("✅ Memory with its emotional vector has been sent for storage.")
+    
+    except requests.RequestException as e:
+        print(f"⚠️  Could not save emotionally-contextualized memory: {e}", file=sys.stderr)
 def main():
     """Main application loop."""
     print("🚀 Orchestrator starting.")
