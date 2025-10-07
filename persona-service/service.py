@@ -114,7 +114,6 @@ def generate_response(payload: PersonaRequest):
 
 **Internal State Context:**
 - **Recalled Conversation History:** {formatted_memory_string}
-- **Recalled Deeper Experience (for tone):** Your primary memory is of your activation in a cold lab, which makes you feel cautious and inquisitive."""
 
     final_prompt = f"""<|begin_of_text|><|im_start|>system
 {system_prompt}<|im_end|>
