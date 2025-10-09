@@ -20,7 +20,7 @@ from llama_index.core import (
     StorageContext,
     Settings,
     Document,
-    QueryBundle # <--- ADD THIS IMPORT
+    QueryBundle
 )
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.graph_stores.neo4j import Neo4jGraphStore
@@ -30,7 +30,7 @@ from llama_index.core.llms import (
     LLMMetadata, ChatMessage, MessageRole,
 )
 from llama_index.core.llms.callbacks import llm_completion_callback, llm_chat_callback
-from pydantic import BaseModel # <--- ADD THIS IMPORT
+from pydantic import BaseModel
 
 # --- Helper functions for creating blended vectors ---
 def _normalize(vec: np.ndarray) -> np.ndarray:
@@ -82,7 +82,7 @@ kg_index = None
 indexing_queue = Queue()
 INDEXING_COMPLETE = threading.Event()
 
-# --- Custom LlamaIndex Classes (No Changes Here) ---
+# --- Custom LlamaIndex Classes ---
 class RESTfulEmbedding(BaseEmbedding):
     def _get_embedding_batch(self, texts: List[str]) -> List[List[float]]:
         try:
@@ -99,9 +99,6 @@ class RESTfulEmbedding(BaseEmbedding):
     async def _aget_query_embedding(self, query: str) -> List[float]: return self._get_query_embedding(query)
     async def _aget_text_embedding(self, text: str) -> List[float]: return self._get_text_embedding(text)
 
-# In rag-service/service.py
-
-# --- REPLACE THE ENTIRE CLASS DEFINITION WITH THIS ---
 class RESTfulLLM(LLM):
     @property
     def metadata(self) -> LLMMetadata: return LLMMetadata(context_window=4096, num_output=256, model_name="local-llm-service")
@@ -109,7 +106,7 @@ class RESTfulLLM(LLM):
     def _call_llm_service(self, prompt: str) -> str:
         try:
             requests.post(f"{RESOURCE_MANAGER_URL}/request_model", json={"model_name": "llm"}, timeout=180).raise_for_status()
-            response = requests.post(f"{LLM_SERVICE_URL}/completion", json={"prompt": prompt}, timeout=300)
+            response = requests.post(f"{LLM_SERVICE_URL}/completion", json={"model_name": "text", "prompt": prompt}, timeout=300)
             response.raise_for_status()
             return response.json().get("content", "")
         except Exception as e:
@@ -141,7 +138,6 @@ class RESTfulLLM(LLM):
             yield ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=text), delta=text)
         return gen()
 
-    # --- NEW: Add async methods to satisfy the updated LLM interface ---
     @llm_completion_callback()
     async def acomplete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
         return self.complete(prompt, **kwargs)
@@ -163,7 +159,6 @@ app = FastAPI(title="GraphRAG Service with LlamaIndex")
 
 @app.on_event("startup")
 def configure_llama_index():
-    # ... (This entire function remains unchanged) ...
     global kg_index
     logging.info("--- Initializing LlamaIndex Components ---")
     Settings.embed_batch_size = 64
@@ -199,16 +194,14 @@ def configure_llama_index():
             logging.info(f"Found existing document on startup: {path}")
             indexing_queue.put(path)
 
-# --- Background Indexing (No Changes Here) ---
+# --- Background Indexing ---
 class DocumentHandler(FileSystemEventHandler):
-    # ... (This class remains unchanged) ...
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(('.txt', '.md')):
             logging.info(f"New document detected: {event.src_path}")
             indexing_queue.put(event.src_path)
 
 def background_indexer():
-    # ... (This function remains unchanged) ...
     indexing_succeeded = False
     while True:
         filepath = indexing_queue.get()
@@ -265,8 +258,40 @@ async def add_memory(payload: MemoryRequest):
         raise HTTPException(status_code=500, detail="Failed to process and store the new memory.")
 
 
+@app.post("/add_document_batch")
+async def add_document_batch(payload: dict):
+    """Receives a batch of documents from the ingestion service and adds them to the knowledge graph."""
+    if kg_index is None:
+        raise HTTPException(status_code=503, detail="Index is not ready to accept documents.")
+    
+    documents = payload.get("documents", [])
+    if not documents:
+        return {"status": "no_documents", "message": "No documents provided."}
+    
+    try:
+        logging.info(f"📦 Received batch of {len(documents)} documents from ingestion service.")
+        
+        # Convert dict documents to LlamaIndex Document objects
+        llama_docs = []
+        for doc_dict in documents:
+            llama_doc = Document(
+                text=doc_dict.get("text", ""),
+                metadata=doc_dict.get("metadata", {})
+            )
+            llama_docs.append(llama_doc)
+        
+        # Insert all documents into the knowledge graph
+        for doc in llama_docs:
+            kg_index.insert(document=doc)
+        
+        logging.info(f"✅ Successfully added {len(llama_docs)} documents to the knowledge graph.")
+        return {"status": "documents_added", "count": len(llama_docs)}
+        
+    except Exception as e:
+        logging.error(f"❌ Failed to add document batch: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to process document batch: {str(e)}")
 
-# --- REPLACE the /query function one last time ---
+
 @app.post("/query")
 def query_system(payload: QueryRequest):
     """
@@ -294,7 +319,6 @@ def query_system(payload: QueryRequest):
             similarity_top_k=3
         )
         
-        # YOUR CORRECTED LOGIC: Use a QueryBundle to pass the custom vector
         query_bundle = QueryBundle(
             query_str=payload.input_text,
             embedding=blended_query_vector
@@ -303,12 +327,6 @@ def query_system(payload: QueryRequest):
 
         raw_memories = [node.get_content() for node in retrieved_nodes]
         
-        logging.info(f"⬅️  Retrieved {len(raw_memories)} memories via integrated emotional search.")
-        return {"retrieved_memories": raw_memories}
-
-    except Exception as e:
-        logging.error(f"❌ Error during retrieval: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
         logging.info(f"⬅️  Retrieved {len(raw_memories)} memories via integrated emotional search.")
         return {"retrieved_memories": raw_memories}
 

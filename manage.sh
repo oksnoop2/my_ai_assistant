@@ -13,6 +13,7 @@ EMBEDDING_NAME="embedding-service" && EMBEDDING_PORT="8003" && EMBEDDING_INTERNA
 RAG_NAME="rag-service"             && RAG_PORT="8004" && RAG_INTERNAL_PORT="8000"
 EMOTION_CLASSIFIER_NAME="emotion-classifier-service" && EMOTION_CLASSIFIER_PORT="8005" && EMOTION_CLASSIFIER_INTERNAL_PORT="8000"
 PERSONA_NAME="persona-service"     && PERSONA_PORT="8006" && PERSONA_INTERNAL_PORT="8000"
+INGESTION_NAME="ingestion-service" && INGESTION_PORT="8007" && INGESTION_INTERNAL_PORT="8007"
 LLM_NAME="llm-service"             && LLM_PORT="8080" && LLM_INTERNAL_PORT="8080"
 NEO4J_NAME="neo4j-db"
 ORCHESTRATOR_NAME="orchestrator-service"
@@ -25,7 +26,7 @@ COMMIT_LLM_INTERNAL_PORT="8080"
 COMMIT_LLM_IMAGE="my-ai/commit-helper-service"
 
 # --- List of all services to be tailed ---
-BACKGROUND_SERVICES="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME"
+BACKGROUND_SERVICES="$RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME $INGESTION_NAME"
 ALL_SERVICES_TO_LOG="$BACKGROUND_SERVICES $ORCHESTRATOR_NAME"
 ALL_CONTAINERS="$BACKGROUND_SERVICES $ORCHESTRATOR_NAME $COMMIT_LLM_NAME"
 
@@ -53,7 +54,6 @@ dump_diagnostics() {
     echo "=================================================="
     echo "============== SYSTEM & GPU STATE =============="
     echo "=================================================="
-    # Check GPU availability
     if command -v nvidia-smi &> /dev/null; then
         nvidia-smi || echo "nvidia-smi failed"
     else
@@ -64,7 +64,7 @@ dump_diagnostics() {
     echo "=================================================="
     echo "============== CONTAINER LOGS ===================="
     echo "=================================================="
-    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME; do
+    for container in $RM_NAME $ASR_NAME $TTS_NAME $EMBEDDING_NAME $RAG_NAME $LLM_NAME $NEO4J_NAME $EMOTION_CLASSIFIER_NAME $PERSONA_NAME $INGESTION_NAME; do
         if podman container exists "$container"; then
             echo -e "\n${YELLOW}### LOGS FOR CONTAINER: $container ###${NC}"
             podman logs --tail 200 "$container" || echo "--> Failed to retrieve logs for $container."
@@ -92,7 +92,6 @@ cleanup() {
 }
 
 stop_services() {
-    # This function now accepts an optional argument to control killing tmux
     local kill_tmux=${1:-false}
     
     echo -e "${YELLOW}### STOPPING AND REMOVING ALL CONTAINERS ###${NC}"
@@ -115,7 +114,7 @@ tail_logs() {
         ["$RM_NAME"]="$YELLOW" ["$ASR_NAME"]="$CYAN" ["$TTS_NAME"]="$MAGENTA"
         ["$RAG_NAME"]="$GREEN" ["$LLM_NAME"]="$RED" ["$PERSONA_NAME"]="$PURPLE"
         ["$EMBEDDING_NAME"]="$GREEN" ["$EMOTION_CLASSIFIER_NAME"]="$MAGENTA"
-        ["$NEO4J_NAME"]="$BLUE" ["$ORCHESTRATOR_NAME"]="$WHITE"
+        ["$NEO4J_NAME"]="$BLUE" ["$ORCHESTRATOR_NAME"]="$WHITE" ["$INGESTION_NAME"]="$ORANGE"
     )
 
     for name in $ALL_SERVICES_TO_LOG; do
@@ -134,14 +133,12 @@ tail_logs() {
 }
 
 check_gpu_support() {
-    # Check if GPU support is available
     if ! command -v nvidia-smi &> /dev/null; then
         echo -e "${YELLOW}⚠️  nvidia-smi not found. GPU support may not be available.${NC}"
         echo "If you have an NVIDIA GPU, please install the NVIDIA drivers and container toolkit."
         return 1
     fi
     
-    # Test if containers can access GPU
     echo -e "${CYAN}Testing GPU access in container...${NC}"
     if podman run --rm --gpus all --security-opt=label=disable nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 nvidia-smi &>/dev/null; then
         echo -e "${GREEN}✅ GPU access confirmed in containers.${NC}"
@@ -171,20 +168,19 @@ start_all_services() {
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/rag-service ./rag-service
     podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/emotion-classifier-service ./emotion-classifier-service
     podman build --no-cache -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/persona-service ./persona-service
+    podman build -q --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/ingestion-service ./ingestion-service
     podman build -q --no-cache --volume $PWD/volumes/pip-cache:/cache:z -t my-ai/orchestrator-service ./orchestrator-service
     echo "✅ Images built."
 
     mkdir -p ./volumes/asr/.cache ./volumes/tts/voices ./volumes/tts/model-cache \
            ./volumes/llm/gguf-models ./volumes/embedding/.cache ./volumes/neo4j/data \
            ./volumes/rag/input_data ./volumes/rag/graph_data ./volumes/emotion-classifier/.cache \
-           ./volumes/persona-service
+           ./volumes/persona-service ./volumes/ingestion/input
 
-    # Call stop_services WITHOUT the argument, so it only cleans containers.
     stop_services
 
     echo -e "${GREEN}### STARTING ALL SERVICES IN BACKGROUND ###${NC}"
     
-    # Set GPU flags based on availability
     if [ $GPU_AVAILABLE -eq 0 ]; then
         GPU_FLAGS="--gpus all --security-opt=label=disable -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all"
         echo -e "${GREEN}Starting services with GPU support enabled.${NC}"
@@ -259,6 +255,14 @@ start_all_services() {
       -e EMOTION_CLASSIFIER_URL="http://$EMOTION_CLASSIFIER_NAME:$EMOTION_CLASSIFIER_INTERNAL_PORT" \
       -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
       my-ai/persona-service
+    
+    # Ingestion Service (no GPU needed for processing, but calls LLM for vision)
+    podman run --replace -d --name $INGESTION_NAME --network $NETWORK_NAME -p $INGESTION_PORT:$INGESTION_INTERNAL_PORT \
+      -v ./volumes/ingestion/input:/app/input:z \
+      -e RESOURCE_MANAGER_URL="http://$RM_NAME:$RM_INTERNAL_PORT" \
+      -e RAG_SERVICE_URL="http://$RAG_NAME:$RAG_INTERNAL_PORT" \
+      -e LLM_SERVICE_URL="http://$LLM_NAME:$LLM_INTERNAL_PORT" \
+      my-ai/ingestion-service
       
     echo "✅ All services started."
 }
@@ -276,7 +280,6 @@ start_commit_llm() {
         echo -e "${CYAN}### Building dedicated commit helper image... ###${NC}"; podman build -t "$COMMIT_LLM_IMAGE" "./$COMMIT_HELPER_NAME";
     fi
     
-    # Check GPU availability for commit helper
     if [ $GPU_AVAILABLE -eq 0 ]; then
         GPU_FLAGS="--gpus all --security-opt=label=disable"
     else
@@ -319,7 +322,6 @@ EOM
     echo -e "\n${GREEN}✅ Commit created locally. Push to remote using your Git client.${NC}"
 }
 
-# ==============================================================================
 # ==============================================================================
 # COMMAND DISPATCHER
 # ==============================================================================

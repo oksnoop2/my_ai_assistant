@@ -4,9 +4,9 @@ import os
 import sys
 import logging
 import requests
-import re  # <-- MODIFICATION: Imported the regex library
-import numpy as np # <--- ADD THIS IMPORT
-from typing import List, Optional # <--- ADD THIS IMPORT
+import re
+import numpy as np
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -114,6 +114,7 @@ def generate_response(payload: PersonaRequest):
 
 **Internal State Context:**
 - **Recalled Conversation History:** {formatted_memory_string}
+"""
 
     final_prompt = f"""<|begin_of_text|><|im_start|>system
 {system_prompt}<|im_end|>
@@ -125,11 +126,16 @@ The user, who seems to be feeling '{user_primary_emotion}', says: "{user_text}"<
     # 5. Generate the final response
     logging.info("Sending final synthesized prompt to LLM...")
     try:
-        llm_response = requests.post(f"{LLM_SERVICE_URL}/completion", json={"prompt": final_prompt, "stop": ["<|im_end|>"]})
+        llm_payload = {
+            "model_name": "text",
+            "prompt": final_prompt
+        }
+        llm_response = requests.post(f"{LLM_SERVICE_URL}/completion", json=llm_payload)
         llm_response.raise_for_status()
         final_text = llm_response.json().get("content", "I am not sure how to respond to that.")
+        
+        logging.info(f"Received final response from LLM: '{final_text[:80]}...'")
+        return {"response": final_text}
+        
     except requests.RequestException as e:
         raise HTTPException(status_code=503, detail=f"LLM service unavailable: {e}")
-
-    logging.info(f"Received final response from LLM: '{final_text}'")
-    return {"response": final_text}
